@@ -16,6 +16,16 @@ import copy
 import datetime as dt
 import re
 import shlex
+
+try:
+    import osproc                       # lives in _bin/, the parent of this package
+    import pycmd
+except ImportError:                     # pragma: no cover - _bin not on sys.path
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    import osproc
+    import pycmd
 from dataclasses import dataclass, field
 
 FAIL = "fail"
@@ -24,6 +34,7 @@ WARN = "warn"
 # The paths hooks.json and the plists were written with. Another machine rewrites them.
 ORIGIN_VAULT = "/home/brain-origin/Brain"
 ORIGIN_HOME = "/home/brain-origin"
+ORIGIN_PYTHON = "/usr/bin/python3"
 
 
 # ---------------------------------------------------------------- findings
@@ -76,9 +87,21 @@ _SCRIPT = re.compile(r"\.py$")
 
 def _tokens(command: str) -> list:
     try:
-        return shlex.split(command)
+        return osproc.split_command(command)        # shlex.split; Windows paths kept whole there
     except ValueError:
         return command.split()
+
+
+_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _is_abs(tok: str) -> bool:
+    """An absolute path, POSIX (/x) or Windows (C:\\x, C:/x)."""
+    return tok.startswith("/") or bool(_DRIVE.match(tok))
+
+
+def _segments(tok: str) -> list:
+    return re.split(r"[\\/]", tok)
 
 
 def hook_identity(command: str):
@@ -91,7 +114,7 @@ def hook_identity(command: str):
     toks = _tokens(command or "")
     for i, tok in enumerate(toks):
         if _SCRIPT.search(tok):
-            base = tok.rsplit("/", 1)[-1]
+            base = _segments(tok)[-1]
             return " ".join([base] + toks[i + 1:])
     return None
 
@@ -187,8 +210,8 @@ def _brain_paths(command: str, brain_dirs) -> list:
     that removes things must not guess where a path really lands.
     """
     return [t for t in _tokens(command or "")
-            if t.startswith("/") and ".." not in t.split("/")
-            and any(t.startswith(d) for d in brain_dirs)]
+            if _is_abs(t) and ".." not in _segments(t)
+            and any(t.replace("\\", "/").startswith(d.replace("\\", "/")) for d in brain_dirs)]
 
 
 def brain_hook_paths(hooks: dict, brain_dirs) -> list:
@@ -262,20 +285,35 @@ def _group_for(groups: list, can_group: dict) -> dict:
 
 
 def localize_hooks(hooks: dict, vault: str, home: str,
-                   origin_vault: str = ORIGIN_VAULT, origin_home: str = ORIGIN_HOME) -> dict:
+                   origin_vault: str = ORIGIN_VAULT, origin_home: str = ORIGIN_HOME,
+                   platform=None, executable=None, origin_python: str = ORIGIN_PYTHON) -> dict:
     """hooks.json carries the original machine's paths; rewrite them for this one.
 
     The vault first, then the home: the vault path contains the home path, and replacing
     the home first would turn the vault into `<new home>/Brain` even when it lives
     somewhere else.
+
+    On Windows (`platform` "win32", default this machine's) the interpreter changes too: the
+    origin's `/usr/bin/python3 <script>` becomes `"<executable>" -X utf8 "<script>"` with backslash
+    paths (`pycmd.hook_command`), so a hook reads and writes the vault's UTF-8 notes as UTF-8.
+    POSIX output is the plain replacement it has always been.
     """
     out = copy.deepcopy(hooks or {})
+    windows = pycmd.is_windows(platform)
+    origin_cmd = re.compile(r"^%s\s+(\S+\.py)(?:\s+(.*?))?\s*$" % re.escape(origin_python), re.S)
     for groups in out.values():
         for g in groups:
             for h in g.get("hooks", []):
                 c = h.get("command")
-                if isinstance(c, str):
-                    h["command"] = c.replace(origin_vault, vault).replace(origin_home, home)
+                if not isinstance(c, str):
+                    continue
+                m = origin_cmd.match(c) if windows else None     # before the paths change: a vault may hold spaces
+                c = c.replace(origin_vault, vault).replace(origin_home, home)
+                if m:
+                    script = m.group(1).replace(origin_vault, vault).replace(origin_home, home)
+                    args = (m.group(2) or "").replace(origin_vault, vault).replace(origin_home, home)
+                    c = pycmd.hook_command(script, args, platform="win32", executable=executable)
+                h["command"] = c
     return out
 
 
@@ -286,7 +324,7 @@ def hook_command_paths(hooks: dict) -> list:
         for g in groups:
             for h in g.get("hooks", []):
                 for tok in _tokens(h.get("command", "")):
-                    if tok.startswith("/") and tok not in seen:
+                    if _is_abs(tok) and tok not in seen:
                         seen.append(tok)
     return seen
 

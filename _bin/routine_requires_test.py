@@ -34,19 +34,23 @@ class FakeProbe(object):
     """A machine made of sets: programs on PATH, directories, files, executables."""
 
     def __init__(self, programs=(), dirs=(), files=(), execs=()):
-        self.programs, self.dirs, self.files, self.execs = set(programs), set(dirs), set(files), set(execs)
+        # normpath: the invented paths below are POSIX-style; on Windows resolve() yields backslashes
+        n = os.path.normpath
+        self.programs, self.dirs = set(programs), set(map(n, dirs))
+        self.files, self.execs = set(map(n, files)), set(map(n, execs))
 
     def which(self, name):
         return "/usr/bin/" + name if name in self.programs else None
 
     def is_dir(self, path):
-        return path in self.dirs
+        return os.path.normpath(path) in self.dirs
 
     def exists(self, path):
+        path = os.path.normpath(path)
         return path in self.dirs or path in self.files
 
     def is_exec(self, path):
-        return path in self.execs
+        return os.path.normpath(path) in self.execs
 
 
 def routine(front):
@@ -83,10 +87,10 @@ def test_requirements():
 
 
 def test_resolve():
-    check("~ is the home directory", R.resolve("~/code/tool", VAULT, HOME) == "/home/someone/code/tool")
-    check("a relative path is relative to the vault", R.resolve("repos/data", VAULT, HOME) == "/vault/repos/data")
-    check("'.' is the vault itself", R.resolve(".", VAULT, HOME) == "/vault")
-    check("an absolute path stays", R.resolve("/opt/x", VAULT, HOME) == "/opt/x")
+    check("~ is the home directory", os.path.normpath(R.resolve("~/code/tool", VAULT, HOME)) == os.path.normpath("/home/someone/code/tool"))
+    check("a relative path is relative to the vault", os.path.normpath(R.resolve("repos/data", VAULT, HOME)) == os.path.normpath("/vault/repos/data"))
+    check("'.' is the vault itself", os.path.normpath(R.resolve(".", VAULT, HOME)) == os.path.normpath("/vault"))
+    check("an absolute path stays", os.path.normpath(R.resolve("/opt/x", VAULT, HOME)) == os.path.normpath("/opt/x"))
 
 
 def everything_present():
@@ -130,7 +134,8 @@ def test_fix():
         return 0, "", ""
     cloned = R.fix(rows, run)
     check("--fix clones a missing repo that carries a url, into its resolved path",
-          calls == [["git", "clone", "-q", "https://example.com/data.git", "/vault/repos/data"]], calls)
+          [c[:-1] + [os.path.normpath(c[-1])] for c in calls]
+          == [["git", "clone", "-q", "https://example.com/data.git", os.path.normpath("/vault/repos/data")]], calls)
     check("and reports what it cloned", cloned == ["repos/data"], cloned)
     check("it never tries to install a program", not any("jq" in " ".join(c) for c in calls), calls)
     calls[:] = []

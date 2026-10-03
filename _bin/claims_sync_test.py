@@ -20,6 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "claims_sync.py")
 sys.path.insert(0, HERE)
 
+import osproc                    # noqa: E402
 import claims_core as C          # noqa: E402  pure: safe to import directly
 
 FAKE_MACHINE = "laptop-a1b2c3d4"
@@ -217,7 +218,7 @@ def main():
             check("configured, one detached worker is started for the session",
                   CS.publish_async("sessP", popen=lambda *a, **k: started.append((a, k))) is True
                   and len(started) == 1 and started[0][0][0][-3:] == ["publish", "--sid", "sessP"]
-                  and started[0][1].get("start_new_session") is True, started)
+                  and all(started[0][1].get(k) == v for k, v in osproc.detached_kwargs().items()), started)
         finally:
             del os.environ["BRAIN_SHARED_DIR"]
 

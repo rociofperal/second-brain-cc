@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import json
 import os
-import platform
+import platform as _platform
 import re
 import subprocess
 import sys
@@ -328,7 +328,7 @@ def main(argv=None):
         facts = {k: (fmt(v) if k.endswith("_version") else v) for k, v in f.items()}
         print(json.dumps(dict(facts=facts, items=items, needs_work=has_work(items)), indent=2, default=str))
     else:
-        print(render(f, items, platform.node().split(".")[0]))
+        print(render(f, items, _platform.node().split(".")[0]))
     return 1 if has_work(items) else 0
 
 

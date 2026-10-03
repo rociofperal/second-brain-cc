@@ -18,6 +18,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[0] = os.path.dirname(HERE)
 VAULT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(1, os.path.join(VAULT, "_bin"))
+from testbin import fake_exe  # noqa: E402
+
+IS_WINDOWS = sys.platform == "win32"
+
+
+def private(path):
+    """Mode 0600 on POSIX. Windows has no POSIX mode bits (the profile folder's ACL keeps the file
+    the user's): there it is enough that the file is there."""
+    if IS_WINDOWS:
+        return os.path.isfile(path)
+    return stat.S_IMODE(os.stat(path).st_mode) == 0o600
 
 ok, fail = [], []
 TMP = []
@@ -71,7 +82,7 @@ def test_files():
     state["scheduler"] = D.scheduler_state("launchd", ["guardian"])
     store.save(state)
     check("the state round-trips", store.load() == state)
-    check("and is private (0600)", stat.S_IMODE(os.stat(store.path).st_mode) == 0o600)
+    check("and is private (0600)", private(store.path))
     import guardian_core.adapters as GA
 
     check("the guardian reads the accepted jobs from the same file",
@@ -80,7 +91,7 @@ def test_files():
     path = mail.save({"enabled": True, "adapter": "smtp", "to": "me@example.com"})
     check("the mail config is written where the guardian reads it, private",
           path == mail.path and json.load(open(path))["adapter"] == "smtp"
-          and stat.S_IMODE(os.stat(path).st_mode) == 0o600)
+          and private(path))
 
 
 def test_kdbx_google():
@@ -131,7 +142,9 @@ def test_local_files_storage():
     check("a path that is a file is (False, why)", bad is False and bool(why), why)
     bad, why = lf.check(os.path.join(blocker, "sub"))
     check("a path that cannot be created is (False, why)", bad is False and bool(why), why)
-    if os.geteuid() != 0:
+    if IS_WINDOWS:
+        print("  - a directory that cannot be written (skipped on Windows: chmod cannot make a directory read-only)")
+    elif os.geteuid() != 0:
         ro = os.path.join(d, "read-only")
         os.makedirs(ro)
         os.chmod(ro, 0o500)
@@ -141,7 +154,7 @@ def test_local_files_storage():
     good, written = lf.persist(target)
     check("persist records it in <brain state>/files-dir.json, private",
           good and written == os.path.join(state, "files-dir.json") and json.load(open(written)) == {"dir": target}
-          and stat.S_IMODE(os.stat(written).st_mode) == 0o600, written)
+          and private(written), written)
     import brain_files
 
     check("which is where files.py reads it",
@@ -168,7 +181,7 @@ def test_local_shared_storage():
     good, written = ls.persist(target)
     check("persist records it in <brain state>/shared-dir.json, private",
           good and written == os.path.join(state, "shared-dir.json") and json.load(open(written)) == {"dir": target}
-          and stat.S_IMODE(os.stat(written).st_mode) == 0o600, written)
+          and private(written), written)
     import brain_shared
 
     check("which is where presence.py and claims_sync.py read it",
@@ -182,15 +195,19 @@ def test_mcp():
     d = tmpdir()
     home = os.path.join(d, "home")
     claude, claude_log = recorder(d, "claude")
-    os.chmod(claude, 0o755)
+    claude = fake_exe(claude, open(claude).read())
     m = AD.McpSetup("/srv/vault", home, environ={"SHELL": "/bin/zsh"}, which=lambda n: claude if n == "claude" else None)
-    check("the snippets name this vault's server", "/srv/vault/integrations/mcp/server.py" in m.snippets()["claude-code"])
+    server = os.path.join("/srv/vault", "integrations", "mcp", "server.py")
+    if sys.platform == "win32":     # on this host the server path is written the way Windows tools print it
+        import ntpath
+        server = ntpath.normpath(server)
+    check("the snippets name this vault's server", server in m.snippets()["claude-code"], m.snippets()["claude-code"])
     check("Claude Code is offered only when its CLI is on PATH",
           m.claude_available() and not AD.McpSetup("/v", home, environ={}, which=lambda n: None).claude_available())
     good, _ = m.register_claude()
     check("registration runs claude mcp add for this server",
           good and calls(claude_log)[-1]["args"][:4] == ["mcp", "add", "brain", "--"]
-          and calls(claude_log)[-1]["args"][-1] == "/srv/vault/integrations/mcp/server.py", calls(claude_log))
+          and calls(claude_log)[-1]["args"][-1] == server, calls(claude_log))
     check("zsh users get ~/.zshrc", m.profile_path() == os.path.join(home, ".zshrc"))
     check("bash users on Linux get ~/.bashrc",
           AD.McpSetup("/v", home, environ={"SHELL": "/bin/bash"}, platform="linux").profile_path()
@@ -239,12 +256,32 @@ def test_scheduler():
           s.control("launchd", []).launchctl == "true" and ls.control("systemd", []).systemctl == "true"
           and ls.control("cron", []).crontab == "true")
 
+    ws = AD.SchedulerSetup(VAULT, home, state, platform="win32", environ=dict(env, USERNAME="u", USERDOMAIN="BOX"),
+                           which=lambda n: "C:\\Windows\\System32\\schtasks.exe" if n == "schtasks" else None)
+    check("Windows detects Task Scheduler", ws.detect() == "schtasks", ws.detect())
+    preview = ws.preview("schtasks", ["guardian"])
+    check("the Task Scheduler preview shows the task XML: the real Python, in UTF-8 mode, through jobrun.py",
+          "second-brain-guardian" in preview and "<Task " in preview and "-X utf8" in preview
+          and os.path.join(VAULT, "_bin", "jobrun.py") in preview and os.path.join(VAULT, "_bin", "guardian.py") in preview,
+          preview[:600])
+    results = ws.install("schtasks", ["guardian", "watch", "remote-control"])
+    tasks = os.path.join(state, "schtasks")
+    check("install records each accepted task in the state directory; faked, schtasks.exe is never started",
+          [r[0] for r in results] == ["second-brain-guardian", "second-brain-watch", "second-brain-remote-control"]
+          and all(r[1] for r in results) and sorted(os.listdir(tasks)) == [
+              "second-brain-guardian.xml", "second-brain-remote-control.xml", "second-brain-watch.xml"],
+          (results, os.listdir(tasks) if os.path.isdir(tasks) else None))
+    calls = []
+    real = AD.SchedulerSetup(VAULT, home, state, platform="win32", environ={})
+    control = real.control("schtasks", ["second-brain-guardian"])
+    check("not faked, the control talks to schtasks.exe", control.schtasks == "schtasks" and control.run is not AD._succeed)
+
 
 def test_routines():
     print("\n== routine token pool and agent command ==")
     d = tmpdir()
     vault = os.path.join(d, "vault")
-    agent = write(os.path.join(d, "bin", "agent"), "#!/bin/sh\nexit 0\n", mode=0o755)
+    agent = fake_exe(os.path.join(d, "bin", "agent"), "#!/bin/sh\nexit 0\n")
     write(os.path.join(vault, "90-Meta", "agent-command.txt"), "# comment\n%s -p {prompt}\n" % agent)
     r = AD.RoutinePool(vault)
     good, detail = r.agent_available()
@@ -261,7 +298,7 @@ def test_routines():
     pool = RD.parse_pool(text)
     check("the pool holds each reference once, in the format routine auth reads",
           [e.label for e in pool] == ["routines-1", "routines-2"] and good and "already" in detail, (text, detail))
-    check("and references only, in a private file", "kp://" in text and stat.S_IMODE(os.stat(path).st_mode) == 0o600)
+    check("and references only, in a private file", "kp://" in text and private(path))
 
 
 FAKE_CLAUDE = r"""#!/bin/sh
@@ -272,6 +309,18 @@ case "$*" in
 esac
 exit 0
 """
+# Windows: the same in Python, so the working directory it records is a Windows path, not MSYS's /c/...
+FAKE_CLAUDE_PY = r"""#!/usr/bin/env python3
+import os, sys
+args = " ".join(sys.argv[1:])
+with open(%(log)r, "a") as fh:
+    fh.write("%%s|%%s|%%s|%%s\n" %% (os.getcwd(), args, os.environ.get("DISABLE_TELEMETRY") or "unset",
+                                   os.environ.get("ANTHROPIC_API_KEY") or "unset"))
+if args == "auth status":
+    print(%(auth)r)
+elif args == "remote-control --chrome --help":
+    print(%(help)r)
+"""
 GOOD_AUTH = '{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty"}'
 CHROME_HELP = "  --[no-]chrome   Claude in Chrome for spawned sessions"
 
@@ -281,17 +330,21 @@ def remote_world(auth=GOOD_AUTH, help_text=CHROME_HELP, settings=None):
     home, state, vault = os.path.join(d, "home"), os.path.join(d, "state"), os.path.join(d, "home", "Brain")
     os.makedirs(vault)
     log = os.path.join(d, "claude.log")
-    claude = write(os.path.join(d, "bin", "claude"), FAKE_CLAUDE % {"log": log, "auth": auth, "help": help_text},
-                   mode=0o755)
+    claude = fake_exe(os.path.join(d, "bin", "claude"),
+                      (FAKE_CLAUDE_PY if IS_WINDOWS else FAKE_CLAUDE) % {"log": log, "auth": auth, "help": help_text})
     if settings is not None:
         write(os.path.join(home, ".claude", "settings.json"), json.dumps(settings))
     return d, home, state, vault, claude, log
 
 
 def remote(home, state, vault, claude, environ=None, euid=1000, **kw):
-    env = {"PATH": os.path.dirname(claude) + ":/usr/bin:/bin"}
+    env = {"PATH": os.pathsep.join([os.path.dirname(claude), "/usr/bin", "/bin"])}
+    if IS_WINDOWS:          # what a process needs from the environment to start at all
+        env.update({k: os.environ[k] for k in ("SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
+                    if os.environ.get(k)})
     env.update(environ or {})
-    kw.setdefault("which", lambda name, path=None: claude if name == "claude" else "/usr/bin/" + name)
+    git = shutil.which("git") or "git"          # prepare() really runs git init
+    kw.setdefault("which", lambda name, path=None: claude if name == "claude" else (git if name == "git" else "/usr/bin/" + name))
     return AD.RemoteControlSetup(vault, home, state, environ=env, euid=euid, hostname=lambda: "Workstation.local",
                                  config_path=os.path.join(state, "remote-control.json"), **kw)
 
@@ -383,18 +436,17 @@ def test_remote_control():
           and rest == "remote-control --chrome --name workstation|unset|unset", (line, detail))
 
     lc_log = os.path.join(d, "loginctl.log")
-    loginctl = write(os.path.join(d, "bin", "loginctl"),
-                     '#!/bin/sh\necho "$*" >> "%s"\n[ "$1" = show-user ] && echo Linger=no\nexit 0\n' % lc_log, mode=0o755)
+    loginctl = fake_exe(os.path.join(d, "bin", "loginctl"),
+                        '#!/bin/sh\necho "$*" >> "%s"\n[ "$1" = show-user ] && echo Linger=no\nexit 0\n' % lc_log)
     good, detail = remote(home, state, vault, claude, loginctl=loginctl, user="someone").linger()
     calls = open(lc_log).read()
     check("lingering is turned on for this user when it is off",
           good and "show-user someone --property=Linger" in calls and "enable-linger someone" in calls, (calls, detail))
-    on = write(os.path.join(d, "bin", "loginctl-on"), "#!/bin/sh\necho Linger=yes\n", mode=0o755)
+    on = fake_exe(os.path.join(d, "bin", "loginctl-on"), "#!/bin/sh\necho Linger=yes\n")
     good, detail = remote(home, state, vault, claude, loginctl=on, user="someone").linger()
     check("and left alone when it is already on", good and "already" in detail, detail)
-    denied = write(os.path.join(d, "bin", "loginctl-denied"),
-                   '#!/bin/sh\n[ "$1" = show-user ] && echo Linger=no && exit 0\necho "Access denied" >&2; exit 1\n',
-                   mode=0o755)
+    denied = fake_exe(os.path.join(d, "bin", "loginctl-denied"),
+                      '#!/bin/sh\n[ "$1" = show-user ] && echo Linger=no && exit 0\necho "Access denied" >&2; exit 1\n')
     good, detail = remote(home, state, vault, claude, loginctl=denied, user="someone").linger()
     check("a refusal is reported, not raised", not good and "Access denied" in detail, detail)
     fake = remote(home, state, vault, claude, environ={"BRAIN_FAKE_SCHEDULER": "1"}, user="someone")

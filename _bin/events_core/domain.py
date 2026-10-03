@@ -542,13 +542,16 @@ def hooks_look_present(settings_hooks, expected_commands) -> bool:
     """A cheap look at Claude Code's `hooks` block: is every registry command wired somewhere?
 
     A command counts when a live hook's command is it, or ends with `/` plus it, so the
-    interpreter and the vault path may differ. This is only the trigger for a repair; what
+    interpreter and the vault path may differ. Windows hooks (`"<python.exe>" -X utf8
+    "<vault>\\_bin\\vault_sync.py" --hook`) are read with `/` separators and without the quote
+    that closes the script's path. This is only the trigger for a repair; what
     exactly is wrong and how to merge it back is the guardian's job.
     """
     expected = list(expected_commands or ())
     if not expected:
         return True
-    live = list(_live_hook_commands(settings_hooks if isinstance(settings_hooks, dict) else {}))
+    live = [c.replace("\\", "/").replace('.py"', ".py")
+            for c in _live_hook_commands(settings_hooks if isinstance(settings_hooks, dict) else {})]
     return all(any(c == e or c.endswith("/" + e) for c in live) for e in expected)
 
 

@@ -284,17 +284,28 @@ def write_run_log(task, fired, rc, output):
 # ---------------------------------------------------------------------------
 # Locking (one --tick at a time)
 # ---------------------------------------------------------------------------
+def _oslock():
+    """_bin/oslock.py (flock on POSIX, msvcrt on Windows). Found next to this repo's _bin/,
+    two levels up from here, the same place VAULT defaults to."""
+    try:
+        import oslock
+    except ImportError:
+        sys.path.append(os.path.join(os.path.dirname(os.path.dirname(HERE)), "_bin"))
+        import oslock
+    return oslock
+
+
 class Lock:
     def __init__(self, path):
         self.path = path
         self.fd = None
 
     def __enter__(self):
-        import fcntl
+        oslock = _oslock()
         ensure_dirs()
         self.fd = open(self.path, "w")
         try:
-            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            oslock.lock(self.fd, blocking=False)
         except OSError:
             self.fd.close()
             self.fd = None
@@ -303,8 +314,7 @@ class Lock:
 
     def __exit__(self, *a):
         if self.fd:
-            import fcntl
-            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            _oslock().unlock(self.fd)
             self.fd.close()
 
 

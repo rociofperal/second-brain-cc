@@ -18,29 +18,46 @@ import argparse
 import copy
 import json
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import osproc  # noqa: E402
+import pycmd  # noqa: E402
+
 PLACEHOLDER = "__VAULT__"
 LIST_PERMISSIONS = ("allow", "deny", "ask")
 
 
-def localize(value, vault):
+_PY_RULE = re.compile(r"python3 __VAULT__/([^\s)*]+\.py)")
+
+
+def localize(value, vault, platform=None, executable=None):
+    """`__VAULT__` becomes the vault path. On Windows a rule that runs `python3 __VAULT__/<script>.py` names
+    the command the way Brain runs it there, `"<python.exe>" -X utf8 "<vault>\\<script>.py"`, or Claude Code
+    would never match it; a `Read(...)` rule gets the vault with `/` separators (its patterns are gitignore-style)."""
+    windows = pycmd.is_windows(platform)
     if isinstance(value, str):
+        if windows:
+            value = _PY_RULE.sub(lambda m: pycmd.hook_command("%s/%s" % (vault, m.group(1)), platform="win32",
+                                                              executable=executable), value)
+            if value.startswith("Read("):
+                return value.replace(PLACEHOLDER, vault.replace("\\", "/"))
         return value.replace(PLACEHOLDER, vault)
     if isinstance(value, list):
-        return [localize(v, vault) for v in value]
+        return [localize(v, vault, platform, executable) for v in value]
     if isinstance(value, dict):
-        return {k: localize(v, vault) for k, v in value.items()}
+        return {k: localize(v, vault, platform, executable) for k, v in value.items()}
     return value
 
 
-def merge(current: dict, example: dict, vault: str):
+def merge(current: dict, example: dict, vault: str, platform=None, executable=None):
     """(merged settings, [one line per addition]). Pure: `current` is not modified."""
-    wanted = localize({k: v for k, v in example.items() if not k.startswith("_") and k != "hooks"}, vault)
+    wanted = localize({k: v for k, v in example.items() if not k.startswith("_") and k != "hooks"}, vault,
+                      platform, executable)
     merged = copy.deepcopy(current)
     changes = []
     for key, value in wanted.items():
@@ -106,7 +123,7 @@ def main(argv=None):
     if args.cmd == "show":
         return 0
     if not args.yes:
-        if not sys.stdin.isatty():
+        if not osproc.isatty(sys.stdin):
             print("Not a terminal: nothing written. To merge: python3 _bin/claude_settings.py merge --yes")
             return 0
         answer = input("Merge these (a backup is kept)? [y/N] ").strip().lower()

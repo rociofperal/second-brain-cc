@@ -12,6 +12,7 @@ exposes it:
 
   macOS    `ioreg -rd1 -c IOPlatformExpertDevice -r`, "IOPlatformUUID"
   Linux    `/etc/machine-id` (no root needed), else `/sys/class/dmi/id/product_uuid`
+  Windows  `MachineGuid` under HKLM\\SOFTWARE\\Microsoft\\Cryptography (`reg query`, no admin needed)
 
 Only that 8-hex fragment is ever written to disk; the full UUID never is, and neither leaves the
 machine it was read on.
@@ -26,6 +27,7 @@ file) is a parameter, the same style as `kp.py`'s `cache_backend()` / `dialog_ba
 decision is testable with no real hardware. See machine_identity_test.py.
 """
 import os
+import platform as _platform
 import re
 import subprocess
 import sys
@@ -74,6 +76,15 @@ def parse_product_uuid(text):
     return t if _PRODUCT_UUID.match(t) else ""
 
 
+_REG_GUID = re.compile(r"MachineGuid\s+REG_SZ\s+([0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})")
+
+
+def parse_reg_machine_guid(text):
+    """The MachineGuid value in `reg query HKLM\\SOFTWARE\\Microsoft\\Cryptography /v MachineGuid`, or ""."""
+    m = _REG_GUID.search(text or "")
+    return m.group(1) if m else ""
+
+
 def read_uuid(platform, run, open_):
     """The machine's uuid, read the way this platform exposes it, or "" when none is readable.
 
@@ -88,6 +99,12 @@ def read_uuid(platform, run, open_):
         except Exception:
             return ""
         return parse_ioreg_uuid(out) if code == 0 else ""
+    if platform == "win32":
+        try:
+            code, out, _err = run(["reg", "query", r"HKLM\SOFTWARE\Microsoft\Cryptography", "/v", "MachineGuid"])
+        except Exception:
+            return ""
+        return parse_reg_machine_guid(out) if code == 0 else ""
     try:
         with open_("/etc/machine-id") as fh:
             found = parse_machine_id(fh.read())
@@ -123,7 +140,7 @@ def current_key(hostname=None, platform=None, run=None, open_=None, environ=None
     forced = (environ.get("BRAIN_MACHINE_KEY") or "").strip()
     if forced:
         return forced
-    hostname = hostname if hostname is not None else os.uname().nodename
+    hostname = hostname if hostname is not None else _platform.node()
     platform = platform if platform is not None else sys.platform
     run = run or _run
     open_ = open_ or open
@@ -132,7 +149,7 @@ def current_key(hostname=None, platform=None, run=None, open_=None, environ=None
 
 def machine_label(hostname=None):
     """The human name of this machine: the sanitised short hostname. It may change; the uuid may not."""
-    return sanitize_hostname(hostname if hostname is not None else os.uname().nodename)
+    return sanitize_hostname(hostname if hostname is not None else _platform.node())
 
 
 def id8(value):
@@ -183,7 +200,7 @@ def machine_is_mine(value, current=None, uuid=None, label=None, historical=None,
     if current is None and forced:
         current, uuid, label = forced, "", ""
     if current is None or uuid is None:
-        hostname = hostname if hostname is not None else os.uname().nodename
+        hostname = hostname if hostname is not None else _platform.node()
         if uuid is None:
             uuid = read_uuid(platform if platform is not None else sys.platform, run or _run, open_ or open)
         if current is None:

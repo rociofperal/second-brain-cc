@@ -94,7 +94,7 @@ def test_register_and_read():
     changed, path = M.register(today="2026-01-02", info=info, folder=folder)
     check("a first registration writes <folder>/<key>.json",
           changed and path == os.path.join(folder, "laptop-a-aaaaaaaa.json") and os.path.isfile(path), path)
-    check("the file is private to the user (0600)", oct(os.stat(path).st_mode & 0o777) == "0o600",
+    check("the file is private to the user (0600)", sys.platform == "win32" or oct(os.stat(path).st_mode & 0o777) == "0o600",
           oct(os.stat(path).st_mode & 0o777))
     before = os.stat(path).st_mtime_ns
     changed, _ = M.register(today="2026-01-02", info=info, folder=folder)
@@ -197,8 +197,21 @@ def test_register_daily():
           rc == 0 and "machine registry: failed" in buf.getvalue(), buf.getvalue())
 
 
+def test_describe_real_hostname():
+    # The real-hostname path (no BRAIN_MACHINE_KEY): a `platform` parameter once shadowed the
+    # platform module and register_daily() returned "failed: AttributeError" on every machine.
+    def no_file(path):
+        raise OSError("none")
+    for plat in ("linux", "darwin", "win32"):
+        try:
+            info = M.describe({}, run=lambda cmd: (1, "", ""), platform=plat, open_=no_file)
+            check("describe reads the real hostname on %s" % plat, bool(info["key"]) and bool(info["label"]), info)
+        except Exception as exc:
+            check("describe reads the real hostname on %s" % plat, False, repr(exc))
+
+
 def main():
-    for t in (test_registry_dir, test_claude_account, test_describe, test_register_and_read, test_here, test_main,
+    for t in (test_describe_real_hostname, test_registry_dir, test_claude_account, test_describe, test_register_and_read, test_here, test_main,
               test_register_daily):
         print("\n== %s ==" % t.__name__)
         try:

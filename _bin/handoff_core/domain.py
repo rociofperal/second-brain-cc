@@ -20,6 +20,7 @@ import binascii
 import hashlib
 import hmac
 import json
+import ntpath
 import posixpath
 import re
 from dataclasses import dataclass, field
@@ -182,15 +183,15 @@ def expiry_problem(transport: str, issued_at: int, ttl: int, now: float, ignore_
 def choose_transport(requested: Optional[str], shared_dir: Optional[str]):
     """(transport, directory) from --to and the configured shared dir."""
     if requested in (None, ""):
-        return ("shared", posixpath.join(shared_dir, HANDOFF_SUBDIR)) if shared_dir else ("inline", None)
+        return ("shared", join(shared_dir, HANDOFF_SUBDIR)) if shared_dir else ("inline", None)
     if requested == "inline":
         return "inline", None
     if requested == "shared":
         if not shared_dir:
             raise UsageError("--to shared needs a shared directory (BRAIN_SHARED_DIR, or the first run's "
                              "multi_machine step); use --to inline or --to PATH")
-        return "shared", posixpath.join(shared_dir, HANDOFF_SUBDIR)
-    if not requested.startswith("/"):
+        return "shared", join(shared_dir, HANDOFF_SUBDIR)
+    if not (requested.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", requested) or requested.startswith("\\\\")):
         raise UsageError("--to takes shared, inline or an absolute directory path, not %r" % requested)
     return "path", requested
 
@@ -222,10 +223,36 @@ class Source:
     home: str = ""
 
 
+_WINDOWS_ABS = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+
+
+def is_windows_path(path) -> bool:
+    """A drive-letter or UNC path: it is split and joined with backslashes (and slashes) like ntpath does."""
+    return isinstance(path, str) and bool(_WINDOWS_ABS.match(path))
+
+
+def basename(path: str) -> str:
+    return ntpath.basename(path) if is_windows_path(path) else posixpath.basename(path)
+
+
+def join(base: str, rel: str) -> str:
+    """base + rel, where rel is always written with slashes in the payload. A Windows base keeps
+    its own separator, so the result is the path the machine itself would have built."""
+    if is_windows_path(base):
+        return ntpath.join(base, rel.replace("/", "\\"))
+    return posixpath.join(base, rel)
+
+
 def relative_under(path: str, root: Optional[str]):
-    """path relative to root when it is strictly inside it, else None. Plain string logic."""
+    """path relative to root when it is strictly inside it, else None. Plain string logic.
+    The answer is always written with slashes; Windows paths compare without regard to case."""
     if not path or not root:
         return None
+    if is_windows_path(path) and is_windows_path(root):
+        path, root = ntpath.normpath(path).replace("\\", "/"), ntpath.normpath(root).replace("\\", "/")
+        if not path.lower().startswith(root.rstrip("/").lower() + "/"):
+            return None
+        return path[len(root.rstrip("/")) + 1:]
     path, root = posixpath.normpath(path), posixpath.normpath(root)
     if not path.startswith(root.rstrip("/") + "/"):
         return None
@@ -237,11 +264,11 @@ def settings_for(src: Source, with_db: bool) -> dict:
     return {
         "version": 1,
         "db": src.db or None,
-        "db_name": posixpath.basename(src.db) if src.db else None,
+        "db_name": basename(src.db) if src.db else None,
         "db_shared_rel": relative_under(src.db, src.shared_dir),
         "db_home_rel": relative_under(src.db, src.home),
         "db_carried": bool(with_db),
-        "keyfile_name": posixpath.basename(src.keyfile) if src.keyfile else None,
+        "keyfile_name": basename(src.keyfile) if src.keyfile else None,
         "keyfile_home_rel": relative_under(src.keyfile, src.home),
         "kp_group": src.group or None,
         "shared_dir": src.shared_dir or None,
@@ -328,10 +355,10 @@ def redeem_targets(settings: dict, home: str, state: str) -> dict:
     out = {}
     if settings.get("keyfile_name"):
         name, rel = _safe_name(settings["keyfile_name"]), _safe_rel(settings.get("keyfile_home_rel"))
-        out[KEYFILE] = posixpath.join(home, rel) if rel else posixpath.join(state, name)
+        out[KEYFILE] = join(home, rel) if rel else join(state, name)
     if settings.get("db_carried"):
         name, rel = _safe_name(settings.get("db_name")), _safe_rel(settings.get("db_home_rel"))
-        out[DATABASE] = posixpath.join(home, rel) if rel else posixpath.join(state, name)
+        out[DATABASE] = join(home, rel) if rel else join(state, name)
     return out
 
 
@@ -343,9 +370,9 @@ def db_candidates(settings: dict, home: str, local_shared: Optional[str]) -> lis
     shared_rel, home_rel = _safe_rel(settings.get("db_shared_rel")), _safe_rel(settings.get("db_home_rel"))
     shared = local_shared or settings.get("shared_dir")
     if shared and shared_rel:
-        out.append(posixpath.join(shared, shared_rel))
+        out.append(join(shared, shared_rel))
     if home_rel:
-        out.append(posixpath.join(home, home_rel))
+        out.append(join(home, home_rel))
     if settings.get("db"):
         out.append(settings["db"])
     seen = []

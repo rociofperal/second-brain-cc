@@ -37,6 +37,8 @@ def main():
         # A forced machine key: the registration at the end of skip-all reads no real hardware.
         env.update(HOME=os.path.join(root, "home"), BRAIN_STATE=state, BRAIN_FAKE_SCHEDULER="1",
                    BRAIN_MACHINE_KEY="test-box-0000abcd")
+        if sys.platform == "win32":         # Python finds ~ through USERPROFILE there, not HOME
+            env.update(USERPROFILE=env["HOME"])
         path = os.path.join(state, "first-run.json")
 
         def run(*args):
@@ -50,10 +52,15 @@ def main():
         rc, out, err = run("run")
         check("run without a terminal changes nothing and says how to run it",
               rc == 0 and not os.path.exists(path) and "setup.sh" in (out + err), (rc, out, err))
-        p = subprocess.run(["bash", SETUP], env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
-        check("setup.sh without a terminal exits 0, writes nothing and says how to run it later",
-              p.returncode == 0 and not os.path.exists(path) and "terminal" in (p.stdout + p.stderr),
-              (p.returncode, p.stdout, p.stderr))
+        if sys.platform == "win32":
+            # `bash` there is WSL's, and setup.sh is the POSIX entry point: Windows runs first_run.py itself.
+            print("  - setup.sh without a terminal (skipped on Windows: setup.sh is the macOS/Linux entry point)")
+        else:
+            p = subprocess.run(["bash", SETUP], env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                               timeout=60)
+            check("setup.sh without a terminal exits 0, writes nothing and says how to run it later",
+                  p.returncode == 0 and not os.path.exists(path) and "terminal" in (p.stdout + p.stderr),
+                  (p.returncode, p.stdout, p.stderr))
         rc, out, err = run("skip-all")
         data = json.load(open(path)) if os.path.exists(path) else {}
         steps = data.get("steps", {})

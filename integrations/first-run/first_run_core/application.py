@@ -220,7 +220,7 @@ def _scheduler(c):
     p = c.p
     kind = p.scheduler.detect()
     if kind not in D.SCHEDULERS:
-        p.prompt.say("No supported scheduler here (launchd, systemd user units or cron): no job can be installed.")
+        p.prompt.say("No supported scheduler here (launchd, systemd user units, cron or Windows Task Scheduler): no job can be installed.")
         c.state["scheduler"] = D.scheduler_state("none", [])
         return c.declined("scheduler", reason="no supported scheduler")
     if not p.prompt.yes_no("Install scheduled jobs with %s? Each one is asked, and nothing is installed until you "
@@ -252,10 +252,11 @@ def _remote_control(c):
     p = c.p
     kind = p.scheduler.detect()
     if kind not in D.SUPERVISORS:
-        p.prompt.say("Remote Control needs launchd or systemd user units to keep its server running; %s cannot, so it "
-                     "is not set up here." % ("cron" if kind == "cron" else "this machine has neither"))
+        p.prompt.say("Remote Control needs launchd, systemd user units or Windows Task Scheduler to keep its server "
+                     "running; %s cannot, so it is not set up here." % ("cron" if kind == "cron" else "this machine has none"))
         return c.declined("remote_control", kind=kind,
-                          reason="needs launchd or systemd user units to supervise a long-lived server, not %s" % kind)
+                          reason="needs launchd, systemd user units or Task Scheduler to supervise a long-lived "
+                                 "server, not %s" % kind)
     p.prompt.say("Remote Control makes this machine appear in the Claude app (phone, desktop, claude.ai), so a session "
                  "opened there runs here, with this machine's files, credentials and Chrome. It needs the claude CLI "
                  "logged in with a claude.ai account (API keys and setup-token tokens do not work), and Chrome with "

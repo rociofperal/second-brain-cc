@@ -123,7 +123,7 @@ def build_ports(args) -> application.Ports:
         notifier=adapters.default_notifier(),
         outbox=outbox,
         vault=adapters.VaultDoctorProbe(vault),
-        interpreter=adapters.InterpreterHealthProbe(),
+        interpreter=adapters.InterpreterHealthProbe.for_platform(),
         state=adapters.JsonStateStore(os.path.join(state, "guardian-state.json")),
         raised=adapters.RaisedAlertsFile(),
         routines=adapters.TasksRegistrySource(),

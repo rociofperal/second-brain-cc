@@ -86,8 +86,11 @@ def test_settings_store():
     check("the new content is written and non-ASCII text survives",
           json.load(open(path, encoding="utf-8"))["note"] == "ñandú"
           and "ñandú" in open(path, encoding="utf-8").read())
-    check("the file keeps its permissions", oct(os.stat(path).st_mode & 0o777) == oct(0o600),
-          oct(os.stat(path).st_mode & 0o777))
+    if sys.platform == "win32":
+        print("  - the file keeps its permissions (skipped on Windows: no POSIX mode bits)")
+    else:
+        check("the file keeps its permissions", oct(os.stat(path).st_mode & 0o777) == oct(0o600),
+              oct(os.stat(path).st_mode & 0o777))
     check("no temporary file is left behind",
           [f for f in os.listdir(d) if f.endswith(".tmp")] == [], os.listdir(d))
     for i in range(6):
@@ -117,7 +120,7 @@ def canonical_file(d, vault_bin="/home/brain-origin/Brain/_bin"):
 def test_canonical():
     print("\n== CanonicalHooksFile ==")
     d = tmpdir()
-    hooks = CC.CanonicalHooksFile(canonical_file(d), vault="/tmp/V", home="/tmp/H").load()
+    hooks = CC.CanonicalHooksFile(canonical_file(d), vault="/tmp/V", home="/tmp/H", platform="linux").load()
     check("canonical hooks are read and localized for this machine",
           hooks["Stop"][0]["hooks"][0]["command"] == "/usr/bin/python3 /tmp/V/_bin/gate_memory.py", hooks)
 
@@ -126,7 +129,7 @@ def agent(d, missing=()):
     config = os.path.join(d, "dot-claude")
     os.makedirs(config, exist_ok=True)
     settings = CC.FileSettingsStore(os.path.join(config, "settings.json"), clock=StepClock())
-    canonical = CC.CanonicalHooksFile(canonical_file(d), vault="/tmp/V", home="/tmp/H")
+    canonical = CC.CanonicalHooksFile(canonical_file(d), vault="/tmp/V", home="/tmp/H", platform="linux")
     return CC.ClaudeCodeAgent(settings, canonical, config_dir=config, paths=FakePaths(missing)), config
 
 
@@ -182,7 +185,8 @@ def test_agent():
 
     config_dir, settings_file = CC.default_locations("/home/someone")
     check("the Claude Code locations are resolved in this adapter module",
-          config_dir == "/home/someone/.claude" and settings_file == "/home/someone/.claude/settings.json",
+          config_dir == os.path.join("/home/someone", ".claude")
+          and settings_file == os.path.join("/home/someone", ".claude", "settings.json"),
           (config_dir, settings_file))
 
 
@@ -210,7 +214,7 @@ def test_stale_hooks():
             {"type": "command", "command": "/usr/bin/python3 /old/path/Brain/_bin/gate_memory.py",
              "timeout": 10}]}]}}))
     a = CC.ClaudeCodeAgent(CC.FileSettingsStore(settings_path, clock=StepClock()),
-                           CC.CanonicalHooksFile(canonical_path, vault=vault, home=d),
+                           CC.CanonicalHooksFile(canonical_path, vault=vault, home=d, platform="linux"),
                            config_dir=config)
 
     w = a.check()
@@ -245,6 +249,35 @@ def test_stale_hooks():
           and a.check().changes == [], (r2, a.check().changes))
 
 
+def test_stale_hooks_win32():
+    print("\n== ClaudeCodeAgent on win32 with stale hooks from another machine or vault ==")
+    d = tmpdir()
+    vault, exe = "C:\\Users\\r\\Brain", "C:\\Py\\python.exe"
+    canonical_path = write(os.path.join(d, "hooks.json"), json.dumps({"hooks": {
+        "Stop": [{"hooks": [
+            {"type": "command", "command": "/usr/bin/python3 /home/brain-origin/Brain/_bin/gate_memory.py",
+             "timeout": 10}]}]}}))
+    settings_path = os.path.join(d, "dot-claude", "settings.json")
+    foreign = {"type": "command", "command": "/usr/bin/python3 C:\\other\\not-brain/gone.py"}
+    write(settings_path, json.dumps({"hooks": {"Stop": [{"hooks": [
+        foreign,
+        {"type": "command", "command": "/usr/bin/python3 /old/path/Brain/_bin/gate_memory.py", "timeout": 10},
+        {"type": "command", "command": '"C:\\Py\\python.exe" -X utf8 "C:\\old\\Brain\\_bin\\gate_memory.py"'}]}]}}))
+    canonical = CC.CanonicalHooksFile(canonical_path, vault=vault, home="C:\\Users\\r",
+                                      platform="win32", executable=exe)
+    a = CC.ClaudeCodeAgent(CC.FileSettingsStore(settings_path, clock=StepClock()), canonical,
+                           config_dir=os.path.dirname(settings_path), paths=FakePaths())
+    want = '"C:\\Py\\python.exe" -X utf8 "C:\\Users\\r\\Brain\\_bin\\gate_memory.py"'
+    check("canonical hooks are localized to the Windows form", a.canonical.load()["Stop"][0]["hooks"][0]["command"] == want,
+          a.canonical.load())
+    check("a POSIX-form or wrong-vault hook is reported", a.check().changes != [], a.check().changes)
+    a.repair()
+    commands = [h["command"] for g in json.load(open(settings_path))["hooks"]["Stop"] for h in g["hooks"]]
+    check("repair leaves exactly the canonical Windows hook, plus the foreign one",
+          sorted(commands) == sorted([want, foreign["command"]]), commands)
+    check("and a second repair has nothing to do", a.check().changes == [], a.check().changes)
+
+
 def test_plugin_sync():
     print("\n== ClaudeCodeAgent with the plugin sync ==")
     import install_plugin as IP
@@ -255,7 +288,7 @@ def test_plugin_sync():
     write(os.path.join(plugin, "skills", "fresh", "SKILL.md"), "fresh from the vault\n")
     write(os.path.join(config, "settings.json"), "{}")
     settings = CC.FileSettingsStore(os.path.join(config, "settings.json"), clock=StepClock())
-    canonical = CC.CanonicalHooksFile(canonical_file(d), vault="/tmp/V", home="/tmp/H")
+    canonical = CC.CanonicalHooksFile(canonical_file(d), vault="/tmp/V", home="/tmp/H", platform="linux")
     a = CC.ClaudeCodeAgent(settings, canonical, config_dir=config, paths=FakePaths(),
                            plugin=IP.Syncer(plugin, config, state))
     keys = [k for k, _ in a.check().changes]
@@ -297,7 +330,7 @@ def main():
     except Exception as exc:
         check("guardian_core.claude_code imports", False, "%s: %s" % (type(exc).__name__, exc))
     else:
-        for t in (test_settings_store, test_canonical, test_agent, test_stale_hooks, test_plugin_sync):
+        for t in (test_settings_store, test_canonical, test_agent, test_stale_hooks, test_stale_hooks_win32, test_plugin_sync):
             try:
                 t()
             except Exception as exc:

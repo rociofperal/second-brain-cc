@@ -56,6 +56,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import osproc  # noqa: E402
 from google_core import adapters as AD  # noqa: E402
 from google_core import calendar_guard as CG  # noqa: E402
 from google_core import application as A  # noqa: E402
@@ -174,7 +175,7 @@ def run(args, ports, stdin, stdout, environ) -> int:
         return 0
 
     if args.cmd == "add":
-        if stdin.isatty():
+        if osproc.isatty(stdin):
             import getpass
 
             secret = getpass.getpass("OAuth client secret for %s: " % args.account)

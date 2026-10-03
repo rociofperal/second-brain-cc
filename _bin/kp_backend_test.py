@@ -203,13 +203,16 @@ def test_build():
 
         argv, prefix, cleanup, env = K.build("kpcli", "/bin/kp_kdbx.pl", ["ls"], "/db.kdbx", "swordfish-test",
                                              os.path.join(tmp, "pw"))
+        if sys.platform == "win32":
+            check("kpcli on Windows: the helper runs through perl", argv[0] == "perl", argv)
+            argv = argv[1:]
         check("kpcli: argv carries --db and --pwfile, not the master itself",
               argv[:2] == ["/bin/kp_kdbx.pl", "ls"] and "--db" in argv and "/db.kdbx" in argv
               and "--pwfile" in argv, argv)
         pwfile = argv[argv.index("--pwfile") + 1]
         check("kpcli: the master lands in a private 0600 file under pwfile_dir",
               os.path.isfile(pwfile) and open(pwfile).read() == "swordfish-test"
-              and stat.S_IMODE(os.stat(pwfile).st_mode) == 0o600, pwfile)
+              and (sys.platform == "win32" or stat.S_IMODE(os.stat(pwfile).st_mode) == 0o600), pwfile)
         check("kpcli: stdin is left free (no master prefix) for a new secret", prefix == "", prefix)
         check("kpcli: a call with no key file still sets BRAIN_KP_KEYFILE, empty, so an inherited "
               "value cannot leak in", env is not None and env.get("BRAIN_KP_KEYFILE") == "",
@@ -281,7 +284,7 @@ def test_keyfile():
         finally:
             K.subprocess.run = real
         check("run(): a keepassxc-shaped call with -k translates cleanly and carries the key file",
-              seen.get("argv", [])[1:4] == ["ls", "--group", "Brain"]
+              seen.get("argv", [])[(2 if sys.platform == "win32" else 1):][:3] == ["ls", "--group", "Brain"]   # [perl] script ...
               and (seen.get("env") or {}).get("BRAIN_KP_KEYFILE") == "/k/store.key", seen)
     finally:
         if saved is None:

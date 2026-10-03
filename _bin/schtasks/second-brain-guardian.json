@@ -1,0 +1,7 @@
+{
+  "description": "Second Brain: keep hooks, git hooks and jobs wired, and alert on problems (guardian.py repair). Installed by integrations/first-run; guardian.py keeps it in step.",
+  "script": "_bin/guardian.py",
+  "args": ["repair"],
+  "every_minutes": 15,
+  "cwd": "vault"
+}

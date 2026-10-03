@@ -50,7 +50,10 @@ EX_CONFIG = 78
 # locations (Apple silicon, Intel). The native installer is preferred: the Homebrew cask can lag
 # several releases behind, and an old CLI rejects --chrome.
 CANDIDATES = ("~/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude")
+# Windows: the native installer's %USERPROFILE%\.local\bin\claude.exe, then an npm global install.
+CANDIDATES_WINDOWS = ("~/.local/bin/claude.exe", "~/AppData/Roaming/npm/claude.cmd")
 SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
+BATCH = (".cmd", ".bat")
 
 
 def config_file(environ=None, home=None, platform=None):
@@ -122,6 +125,10 @@ def is_wrapper(path, read=_read_head):
     node script an npm install links, are not wrappers.
     """
     head = read(path) or b""
+    if os.path.splitext(path)[1].lower() in BATCH:
+        # Windows: a batch file is a wrapper, except the shim npm writes for a global install, which
+        # only hands its arguments to node (it finds itself through %dp0%).
+        return not (b"%dp0%" in head.lower() and b"node" in head.lower())
     if not head.startswith(b"#!"):
         return False
     words = head[2:].split(b"\n", 1)[0].decode("utf-8", "replace").split()
@@ -133,7 +140,12 @@ def is_wrapper(path, read=_read_head):
     return interpreter in SHELLS
 
 
-def find_claude(environ, home, which=shutil.which, read=_read_head):
+def candidates(platform=None):
+    """Where the CLI is looked for after PATH, on this platform."""
+    return CANDIDATES_WINDOWS if (platform or sys.platform) == "win32" else CANDIDATES
+
+
+def find_claude(environ, home, which=shutil.which, read=_read_head, platform=None):
     """The claude CLI: on PATH, then ~/.local/bin, /opt/homebrew/bin and /usr/local/bin.
 
     A real CLI wins over a shell wrapper wherever each is found; a wrapper is returned only when
@@ -143,8 +155,8 @@ def find_claude(environ, home, which=shutil.which, read=_read_head):
     first = which("claude", path=environ.get("PATH"))
     if first:
         seen.append(first)
-    for candidate in CANDIDATES:
-        path = os.path.join(home, candidate[2:]) if candidate.startswith("~/") else candidate
+    for candidate in candidates(platform):
+        path = os.path.join(home, *candidate[2:].split("/")) if candidate.startswith("~/") else candidate
         if path not in seen and os.path.isfile(path) and os.access(path, os.X_OK):
             seen.append(path)
     for path in seen:
@@ -177,6 +189,53 @@ def problems(config, exists, is_root, claude):
     return out
 
 
+# Windows: Task Scheduler's RestartOnFailure does not restart a task whose program exits with an error
+# (it reacts to the task failing to start), so serve supervises the server itself there: it is started
+# again after a short pause, the pause growing while it keeps failing and starting over once a run has
+# lasted STABLE_SECONDS. A clean exit (0) or Ctrl+C ends the loop.
+RESTART_BACKOFF = (5, 15, 30, 60)
+STABLE_SECONDS = 300
+# How an interrupted console program exits: 130 (POSIX shells), STATUS_CONTROL_C_EXIT on Windows.
+INTERRUPTED = (130, -2, 0xC000013A)
+
+
+def serve_loop(argv, env, run=None, sleep=None, clock=None, stop=lambda: False, log=None):
+    """Run the server until it exits cleanly, restarting it after a failure; returns the exit status.
+    Everything it touches is injectable, so the loop is tested without a server or a clock."""
+    import subprocess
+    import time
+
+    run = run or (lambda a, e: subprocess.run(a, env=e).returncode)
+    sleep, clock = sleep or time.sleep, clock or time.monotonic
+    log = log or (lambda line: print("remote_control.py: %s" % line, file=sys.stderr, flush=True)
+                  if sys.stderr else None)
+    failures = 0
+    while True:
+        started = clock()
+        try:
+            rc = run(argv, env)
+        except KeyboardInterrupt:
+            return 130
+        except OSError as exc:
+            log("could not start %s: %s" % (argv[0], exc))
+            rc = 127
+        if rc == 0 or rc in INTERRUPTED:
+            return rc
+        if stop():
+            return rc
+        if clock() - started >= STABLE_SECONDS:
+            failures = 0
+        delay = RESTART_BACKOFF[min(failures, len(RESTART_BACKOFF) - 1)]
+        failures += 1
+        log("the server exited with status %s; starting it again in %ds" % (rc, delay))
+        try:
+            sleep(delay)
+        except KeyboardInterrupt:
+            return 130
+        if stop():
+            return rc
+
+
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
     if args not in (["serve"], ["show"]):
@@ -186,7 +245,9 @@ def main(argv=None):
     path = config_file(environ, home)
     config = load(path)
     claude = find_claude(environ, home)
-    is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    import osproc
+
+    is_root = osproc.is_root()
     found = problems(config, os.path.exists, is_root, claude)
     if args == ["show"]:
         print("config:    %s" % path)
@@ -207,6 +268,10 @@ def main(argv=None):
     for line in warnings(claude):
         print("remote_control.py: warning: %s" % line, file=sys.stderr)
     os.chdir(config["dir"])
+    if sys.platform == "win32":
+        # No exec on Windows (os.execve starts a new process and this one exits at once, so Task Scheduler
+        # would see the job end): run the server as a child, and start it again when it fails (serve_loop).
+        return serve_loop(command(config["name"], claude), server_env(environ))
     os.execve(claude, command(config["name"], claude), server_env(environ))
 
 

@@ -33,8 +33,9 @@ _ACCOUNT = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 def _expand(value, home):
     value = str(value or "").strip()
-    if value == "~" or value.startswith("~/"):
-        return home + value[1:]
+    if value == "~" or value.startswith("~/") or value.startswith("~\\"):
+        expanded = home + value[1:]
+        return os.path.normpath(expanded) if os.sep == "\\" else expanded    # one separator style on Windows
     return value
 
 
@@ -122,6 +123,8 @@ class LocalFiles:
         return os.path.lexists(path)
 
     def is_private(self, path):
+        if sys.platform == "win32":
+            return True      # no group/other mode bits on Windows: the file is guarded by its folder's ACL
         return not (os.stat(path).st_mode & 0o077)
 
     def read(self, path):

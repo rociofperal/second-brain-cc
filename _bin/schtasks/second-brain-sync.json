@@ -1,0 +1,7 @@
+{
+  "description": "Second Brain: commit and push the vault (vault_sync.py). Installed by integrations/first-run; guardian.py keeps it in step.",
+  "script": "_bin/vault_sync.py",
+  "args": [],
+  "every_minutes": 10,
+  "cwd": "vault"
+}

@@ -1,0 +1,7 @@
+{
+  "description": "Second Brain: run the periodic tasks in 90-Meta/scheduled-tasks.md (tasks.py). Installed by integrations/first-run; guardian.py keeps it in step.",
+  "script": "_bin/tasks.py",
+  "args": [],
+  "every_minutes": 10,
+  "cwd": "vault"
+}

@@ -11,8 +11,8 @@ that is domain.py; these only read and write.
 from __future__ import annotations
 
 import datetime as dt
-import fcntl
 import json
+import ntpath
 import os
 import plistlib
 import re
@@ -26,6 +26,20 @@ import time
 from contextlib import contextmanager
 
 from . import domain as D
+
+try:
+    import oslock                       # lives in _bin/, the parent of this package
+except ImportError:                     # pragma: no cover - _bin not on sys.path
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import oslock
+import osproc                           # next to oslock: uid, process groups, command splitting
+import pycmd                            # the one python.exe Windows hooks name
+
+import sys as _sys_platform
+IS_WINDOWS = _sys_platform.platform == "win32"
+# git by absolute path where it has one (launchd starts jobs with a bare PATH); from PATH on Windows.
+GIT = "git" if IS_WINDOWS else "/usr/bin/git"
 
 HOME = os.path.expanduser("~")
 CLT = "/Library/Developer/CommandLineTools"
@@ -76,11 +90,11 @@ def locked(path: str):
     """An exclusive advisory lock on `<path>.lock`, for files two processes write."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path + ".lock", "a") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        oslock.lock(fh)
         try:
             yield
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            oslock.unlock(fh)
 
 
 def read_json(path: str, default):
@@ -125,7 +139,7 @@ class LaunchctlControl:
                  run=subprocess.run, timeout=15, backup_dir=None, environ=None, clock=None, allowed=None):
         self.vault, self.home = vault, home
         self.allowed = None if allowed is None else set(allowed)
-        self.uid = os.getuid() if uid is None else uid
+        self.uid = osproc.current_uid() if uid is None else uid    # None on Windows
         self.agents_dir = agents_dir or os.path.join(home, "Library", "LaunchAgents")
         self.launchctl, self.run, self.timeout = launchctl, run, timeout
         self.backup_dir = backup_dir
@@ -158,7 +172,7 @@ class LaunchctlControl:
         return os.path.exists(self._installed(label))
 
     def is_loaded(self, label) -> bool:
-        return self._call("print", "gui/%d/%s" % (self.uid, label))[0] == 0
+        return self._call("print", "gui/%s/%s" % (self.uid, label))[0] == 0
 
     def last_exit_ok(self, label):
         rc, out, _ = self._call("list", label)
@@ -189,7 +203,7 @@ class LaunchctlControl:
             return False, "%s: %s" % (type(exc).__name__, exc)
 
     def bootstrap(self, label):
-        rc, out, err = self._call("bootstrap", "gui/%d" % self.uid, self._installed(label))
+        rc, out, err = self._call("bootstrap", "gui/%s" % self.uid, self._installed(label))
         return rc == 0, (err or out).strip()
 
     def drifted(self, label) -> bool:
@@ -225,7 +239,7 @@ class LaunchctlControl:
         if not done:
             return False, "%s; %s" % (detail, note)
         if was_loaded:
-            self._call("bootout", "gui/%d/%s" % (self.uid, label))
+            self._call("bootout", "gui/%s/%s" % (self.uid, label))
             done, detail = self.bootstrap(label)
             return done, "; ".join(x for x in (note, detail) if x)
         return True, "rewritten (not loaded); " + note
@@ -318,7 +332,7 @@ def clear_alert(key: str, path=None) -> None:
 class VaultDoctorProbe:
     """Sync, index and link health, read the way doctor.py reads them."""
 
-    def __init__(self, vault, state_dir=None, git="/usr/bin/git", run=None, now=time.time):
+    def __init__(self, vault, state_dir=None, git=GIT, run=None, now=time.time):
         self.vault = vault
         self.state_dir = state_dir or legacy_state_dir()     # linkfix.json lives there
         self.git, self.now = git, now
@@ -370,7 +384,7 @@ class GitHooksControl:
     extensions.worktreeConfig is on.
     """
 
-    def __init__(self, vault, git="/usr/bin/git", run=plain_run, names=None):
+    def __init__(self, vault, git=GIT, run=plain_run, names=None):
         self.vault, self.git, self.run = vault, git, run
         self.names = tuple(names) if names else _git_hook_names()
 
@@ -515,6 +529,14 @@ class InterpreterHealthProbe:
         last = (p.stderr or "").strip().splitlines()
         return False, "exit %d%s" % (p.returncode, (": " + last[-1][:120]) if last else "")
 
+    @classmethod
+    def for_platform(cls, platform=None, executable=None):
+        """The defaults for this platform. Windows has no /usr/bin/python3 and no Xcode gate: the hooks
+        run the Python the vault was set up with, so that is the one judged, with no fallbacks."""
+        if (platform or _sys_platform.platform) == "win32":
+            return cls(hook_python=pycmd.windows_python(executable), fallbacks=())
+        return cls()
+
     def python3_health(self) -> list:
         out = [D.InterpreterStatus(self.hook_python, *self._probe(self.hook_python))]
         for c in self.fallbacks:
@@ -557,9 +579,13 @@ def load_agent_command(vault: str, environ=None) -> str:
     return ""
 
 
-def _split(template: str) -> list:
+def _split(template) -> list:
+    """The template's words. A list is taken as already split (routine_auth_core passes one, so no
+    word is quoted and split again)."""
+    if isinstance(template, (list, tuple)):
+        return [str(t) for t in template]
     try:
-        return shlex.split(template or "")
+        return osproc.split_command(template or "")
     except ValueError:
         return []
 
@@ -572,16 +598,33 @@ class CliAgentRunner:
     everything it started, not just the top process.
     """
 
-    def __init__(self, template, cwd=None, env=None, popen=subprocess.Popen, which=shutil.which):
+    def __init__(self, template, cwd=None, env=None, popen=subprocess.Popen, which=shutil.which,
+                 platform=None, environ=None, isfile=os.path.isfile, read=None):
         self.template, self.cwd, self.env = template, cwd, env
         self.popen, self.which = popen, which
+        self.platform = platform or _sys_platform.platform
+        self.environ, self.isfile, self.read = environ, isfile, read      # Windows probes, injectable
+
+    def _windows_argv(self, argv):
+        """Windows: a `.cmd` npm shim cuts its command line at the first newline, so the prompt would
+        arrive as its first line. Run node on the script it launches instead (osproc.unwrap_npm_shim)."""
+        exe = argv[0]
+        if not (os.path.dirname(exe) or ntpath.dirname(exe)):      # a bare name: the file PATH finds for it
+            found = self.which(exe, path=(self.env or os.environ).get("PATH"))
+            exe = found or exe
+        else:
+            exe = osproc.resolve_exe(exe, platform="win32", environ=self.environ, isfile=self.isfile)
+        unwrapped = osproc.unwrap_npm_shim(exe, platform="win32", read=self.read, isfile=self.isfile,
+                                           which=self.which)
+        return unwrapped + argv[1:] if unwrapped else [exe] + argv[1:]
 
     def available(self) -> bool:
         toks = _split(self.template)
         if not toks:
             return False
-        if "/" in toks[0]:
-            return os.path.isfile(toks[0]) and os.access(toks[0], os.X_OK)
+        if os.path.dirname(toks[0]):                     # a path, not a name to look up on PATH
+            exe = osproc.resolve_exe(toks[0])            # Windows: claude means claude.exe / .cmd
+            return os.path.isfile(exe) and os.access(exe, os.X_OK)
         return self.which(toks[0], path=(self.env or os.environ).get("PATH")) is not None
 
     def run(self, prompt_path: str, timeout: int):
@@ -594,10 +637,17 @@ class CliAgentRunner:
         except OSError as exc:
             return 2, "", "routine file unreadable: %s" % exc
         argv = [t.replace("{prompt_file}", prompt_path).replace("{prompt}", body) for t in toks]
+        if self.platform == "win32":
+            argv = self._windows_argv(argv)
+            problem = osproc.batch_argument_problem(argv, platform="win32")
+            if problem:                    # cmd.exe would execute `&`, `|`, %VAR% in the routine text
+                return 126, "", problem
+        elif os.path.dirname(argv[0]):
+            argv[0] = osproc.resolve_exe(argv[0])
         try:
             proc = self.popen(argv, cwd=self.cwd, env=self.env, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                              start_new_session=True)
+                              **osproc.new_group_kwargs())
         except FileNotFoundError:
             return 127, "", "agent command not found: %s" % toks[0]
         except PermissionError:
@@ -607,10 +657,7 @@ class CliAgentRunner:
         try:
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                proc.kill()
+            osproc.kill_tree(proc)          # its process group on POSIX, taskkill /T on Windows
             out, err = proc.communicate()
             return 124, out or "", (err or "") + "agent timed out after %ss" % timeout
         return proc.returncode, out or "", err or ""
@@ -818,6 +865,8 @@ class HookProbe:
     """
 
     KEEP_ENV = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "SHELL")
+    # Windows: a process started without SYSTEMROOT cannot even initialise Python's random.
+    KEEP_ENV_WINDOWS = ("SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "USERNAME", "USERDOMAIN")
 
     def __init__(self, canonical, events, run=subprocess.run, scratch_root=None, environ=None):
         self.canonical, self.events = canonical, events
@@ -832,13 +881,19 @@ class HookProbe:
         env.update({"HOME": os.path.join(root, "home"), "TMPDIR": root,
                     "BRAIN_STATE": os.path.join(root, "state"), "BRAIN_VAULT": os.path.join(root, "vault"),
                     "BRAIN_OFFLINE": "1", "PYTHONDONTWRITEBYTECODE": "1",
-                    "GIT_CEILING_DIRECTORIES": "%s:%s" % (root, os.path.realpath(root)),
+                    "GIT_CEILING_DIRECTORIES": os.pathsep.join((root, os.path.realpath(root))),
                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+        if IS_WINDOWS:
+            env.update({k: self.environ[k] for k in self.KEEP_ENV_WINDOWS if self.environ.get(k)})
+            home = os.path.join(root, "home")
+            env.update({"USERPROFILE": home, "APPDATA": os.path.join(home, "AppData", "Roaming"),
+                        "LOCALAPPDATA": os.path.join(home, "AppData", "Local"), "TEMP": root, "TMP": root,
+                        "PYTHONUTF8": "1"})
         return env
 
     def _one(self, case, env, cwd):
         try:
-            argv = shlex.split(case.command)
+            argv = osproc.split_command(case.command)
         except ValueError as exc:
             return D.ProbeResult(case.event_id, None, error="command does not parse: %s" % exc)
         try:
@@ -1095,6 +1150,348 @@ class CronControl:
         return done, "rewritten; " + detail
 
 
+# ---------------------------------------------------------------- Windows Task Scheduler
+
+
+SCHTASKS_START = "2026-01-01T00:00:00"     # a fixed past start: the render is the same on every run
+# Last Run Result codes that are not a failure: 0, ready (0x41300), running (0x41301),
+# never run (0x41303), ended by the user or by the scheduler on a restart (0x41306).
+SCHTASKS_OK_RESULTS = {0, 267008, 267009, 267011, 267014}
+
+
+def default_pythonw(executable=None):
+    """pythonw.exe next to this Python when there is one (no console window every minute), else this Python."""
+    exe = executable or _sys_platform.executable
+    folder, name = os.path.split(exe)
+    if name.lower() == "python.exe":
+        candidate = os.path.join(folder, "pythonw.exe")
+        if os.path.exists(candidate):
+            return candidate
+    return exe
+
+
+def _xml(text) -> str:
+    from xml.sax.saxutils import escape
+
+    return escape(str(text))
+
+
+class SchtasksControl:
+    """The scheduled jobs the vault defines, as per-user Windows Task Scheduler tasks (schtasks.exe).
+
+    Every `_bin/schtasks/<label>.json` is one job: the script it runs and either `every_minutes`
+    (a periodic job, like a systemd timer) or `at_logon` (a long-lived server, restarted when it
+    fails, like Restart=always). Same port as LaunchctlControl and SystemdUserControl:
+
+      install    renders the task XML, keeps a copy in <brain state>/schtasks/<label>.xml (the
+                 "installed" file, as ~/.config/systemd/user holds the units) and registers it
+                 with `schtasks /Create /XML <file> /TN <label> /F`
+      bootstrap  registers it again from that copy (a task deleted by hand comes back) and starts a
+                 server at once with `/Run`
+      is_loaded  the task is registered and enabled (`/Query /XML`)
+      reinstall  backs the drifted copy up first, then installs; a running server is restarted
+
+    Every task runs as the current user, only while that user is logged on (InteractiveToken):
+    no password is stored and no administrator rights are needed. The command is the real Python
+    (pythonw.exe, so no console window opens) in UTF-8 mode, through jobrun.py, which sets
+    BRAIN_JOB_LABEL and PYTHONUTF8=1 and logs to <brain state>/logs/<label>.log:
+
+      pythonw.exe -X utf8 "<vault>\\_bin\\jobrun.py" <label> "<vault>\\_bin\\guardian.py" repair
+    """
+
+    def __init__(self, vault, home=HOME, tasks_dir=None, schtasks="schtasks", run=subprocess.run, timeout=30,
+                 backup_dir=None, environ=None, clock=None, allowed=None, python=None, user=None):
+        self.vault, self.home = vault, home
+        self.environ = os.environ if environ is None else environ
+        self.tasks_dir = tasks_dir or os.path.join(default_state_dir(), "schtasks")
+        self.schtasks, self.run, self.timeout = schtasks, run, timeout
+        self.backup_dir = backup_dir
+        self.clock = clock or SystemClock()
+        self.allowed = None if allowed is None else set(allowed)
+        self.python = python or default_pythonw()
+        if user is None:
+            name, domain = self.environ.get("USERNAME") or "", self.environ.get("USERDOMAIN") or ""
+            user = ("%s\\%s" % (domain, name)) if domain and name else name
+        self.user = user
+
+    def _call(self, *args):
+        try:
+            p = self.run([self.schtasks] + list(args), capture_output=True, text=True, errors="replace",
+                         timeout=self.timeout, stdin=subprocess.DEVNULL)
+            return p.returncode, (p.stdout or "").replace("\x00", ""), (p.stderr or "").replace("\x00", "")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return 1, "", "%s: %s" % (type(exc).__name__, exc)
+
+    def _folder(self):
+        return os.path.join(self.vault, "_bin", "schtasks")
+
+    def _installed(self, label):
+        return os.path.join(self.tasks_dir, label + ".xml")
+
+    def labels(self) -> list:
+        try:
+            names = sorted(f[:-len(".json")] for f in os.listdir(self._folder()) if f.endswith(".json"))
+        except OSError:
+            return []
+        return [n for n in names if self.allowed is None or n in self.allowed]
+
+    def spec(self, label) -> dict:
+        with open(os.path.join(self._folder(), label + ".json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict) or not data.get("script"):
+            raise ValueError("%s.json names no script" % label)
+        return data
+
+    def _long_lived(self, label) -> bool:
+        try:
+            return bool(self.spec(label).get("at_logon"))
+        except (OSError, ValueError):
+            return False
+
+    def command(self, label):
+        """(program, arguments, working directory) the task runs."""
+        spec = self.spec(label)
+        script = os.path.join(self.vault, *spec["script"].split("/"))
+        jobrun = os.path.join(self.vault, "_bin", "jobrun.py")
+        argv = ["-X", "utf8", jobrun, label, script] + [str(a) for a in spec.get("args") or []]
+        cwd = self.home if spec.get("cwd") == "home" else self.vault
+        return self.python, subprocess.list2cmdline(argv), cwd
+
+    def render(self, label) -> str:
+        """The task as Task Scheduler XML, for this vault, home, Python and user."""
+        spec = self.spec(label)
+        program, arguments, cwd = self.command(label)
+        user = "      <UserId>%s</UserId>\n" % _xml(self.user) if self.user else ""
+        if spec.get("at_logon"):
+            trigger = ("    <LogonTrigger>\n      <Enabled>true</Enabled>\n%s    </LogonTrigger>\n"
+                       % user)
+            limit, restart = "PT0S", ("    <RestartOnFailure>\n      <Interval>PT1M</Interval>\n"
+                                      "      <Count>999</Count>\n    </RestartOnFailure>\n")
+        else:
+            minutes = int(spec.get("every_minutes") or 0)
+            if minutes < 1:
+                raise ValueError("%s.json has neither every_minutes nor at_logon" % label)
+            trigger = ("    <TimeTrigger>\n      <Repetition>\n        <Interval>PT%dM</Interval>\n"
+                       "        <StopAtDurationEnd>false</StopAtDurationEnd>\n      </Repetition>\n"
+                       "      <StartBoundary>%s</StartBoundary>\n      <Enabled>true</Enabled>\n"
+                       "    </TimeTrigger>\n" % (minutes, SCHTASKS_START))
+            limit, restart = "PT1H", ""
+        return (
+            '<?xml version="1.0" encoding="UTF-16"?>\n'
+            '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
+            "  <RegistrationInfo>\n"
+            "    <Description>%(desc)s</Description>\n"
+            "    <URI>\\%(label)s</URI>\n"
+            "  </RegistrationInfo>\n"
+            "  <Triggers>\n%(trigger)s  </Triggers>\n"
+            "  <Principals>\n"
+            '    <Principal id="Author">\n'
+            "%(user)s"
+            "      <LogonType>InteractiveToken</LogonType>\n"
+            "      <RunLevel>LeastPrivilege</RunLevel>\n"
+            "    </Principal>\n"
+            "  </Principals>\n"
+            "  <Settings>\n"
+            "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n"
+            "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n"
+            "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n"
+            "    <AllowHardTerminate>true</AllowHardTerminate>\n"
+            "    <StartWhenAvailable>true</StartWhenAvailable>\n"
+            "    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>\n"
+            "    <IdleSettings>\n"
+            "      <StopOnIdleEnd>false</StopOnIdleEnd>\n"
+            "      <RestartOnIdle>false</RestartOnIdle>\n"
+            "    </IdleSettings>\n"
+            "    <AllowStartOnDemand>true</AllowStartOnDemand>\n"
+            "    <Enabled>true</Enabled>\n"
+            "    <Hidden>false</Hidden>\n"
+            "    <RunOnlyIfIdle>false</RunOnlyIfIdle>\n"
+            "    <WakeToRun>false</WakeToRun>\n"
+            "    <ExecutionTimeLimit>%(limit)s</ExecutionTimeLimit>\n"
+            "    <Priority>7</Priority>\n"
+            "%(restart)s"
+            "  </Settings>\n"
+            '  <Actions Context="Author">\n'
+            "    <Exec>\n"
+            "      <Command>%(program)s</Command>\n"
+            "      <Arguments>%(arguments)s</Arguments>\n"
+            "      <WorkingDirectory>%(cwd)s</WorkingDirectory>\n"
+            "    </Exec>\n"
+            "  </Actions>\n"
+            "</Task>\n"
+        ) % {"desc": _xml(spec.get("description") or label), "label": _xml(label), "trigger": trigger,
+             "user": user, "limit": limit, "restart": restart, "program": _xml(program),
+             "arguments": _xml(arguments), "cwd": _xml(cwd)}
+
+    def _read_installed(self, label):
+        with open(self._installed(label), encoding="utf-16") as fh:
+            return fh.read()
+
+    def installed(self, label) -> bool:
+        return os.path.exists(self._installed(label))
+
+    def is_loaded(self, label) -> bool:
+        rc, out, _ = self._call("/Query", "/TN", label, "/XML")
+        if rc != 0:
+            return False
+        settings = re.search(r"<Settings>(.*?)</Settings>", out, re.S)
+        enabled = re.search(r"<Enabled>\s*(\w+)\s*</Enabled>", re.sub(r"<IdleSettings>.*?</IdleSettings>", "",
+                                                                    settings.group(1), flags=re.S)) if settings else None
+        return not (enabled and enabled.group(1).lower() == "false")
+
+    def last_exit_ok(self, label):
+        import csv
+        import io
+
+        rc, out, _ = self._call("/Query", "/TN", label, "/V", "/FO", "CSV", "/NH")
+        if rc != 0:
+            return False, "not known to schtasks (exit %d)" % rc
+        rows = [r for r in csv.reader(io.StringIO(out)) if len(r) > 6]
+        if not rows:
+            return True, "no run recorded"
+        value = rows[0][6].strip()                       # "Last Result": the same column in every language
+        try:
+            code = int(value, 16) if value.lower().startswith("0x") else int(value)
+        except ValueError:
+            return True, "Last Result=%s" % value
+        code &= 0xFFFFFFFF
+        return code in SCHTASKS_OK_RESULTS, "Last Result=%d" % code
+
+    def install(self, label):
+        try:
+            text = self.render(label)
+            os.makedirs(self.tasks_dir, exist_ok=True)
+            tmp = "%s.%d.tmp" % (self._installed(label), os.getpid())
+            with open(tmp, "w", encoding="utf-16") as fh:            # schtasks /XML wants UTF-16
+                fh.write(text)
+            os.replace(tmp, self._installed(label))
+        except Exception as exc:
+            return False, "%s: %s" % (type(exc).__name__, exc)
+        rc, out, err = self._call("/Create", "/TN", label, "/XML", self._installed(label), "/F")
+        if rc != 0:
+            return False, "schtasks /Create failed: %s" % ((err or out).strip() or "exit %d" % rc)
+        return True, self._installed(label)
+
+    def bootstrap(self, label):
+        rc, out, err = self._call("/Create", "/TN", label, "/XML", self._installed(label), "/F")
+        if rc != 0:
+            return False, (err or out).strip() or "schtasks /Create exit %d" % rc
+        if self._long_lived(label):
+            rc, out, err = self._call("/Run", "/TN", label)
+        return rc == 0, (err or out).strip()
+
+    def drifted(self, label) -> bool:
+        """The recorded task is not what the vault's template renders to on this machine."""
+        try:
+            return self._read_installed(label) != self.render(label)
+        except (OSError, ValueError, UnicodeError):
+            return False
+
+    def self_label(self) -> str:
+        """The job this process runs as: jobrun.py sets BRAIN_JOB_LABEL, or ""."""
+        return self.environ.get("BRAIN_JOB_LABEL") or ""
+
+    def reinstall(self, label):
+        try:
+            backup_dir = self.backup_dir or os.path.join(default_state_dir(), "schtasks-backups")
+            os.makedirs(backup_dir, exist_ok=True)
+            stamp = self.clock.now().strftime("%Y%m%d-%H%M%S")
+            if os.path.exists(self._installed(label)):
+                shutil.copy2(self._installed(label), os.path.join(backup_dir, "%s.xml.%s" % (label, stamp)))
+        except Exception as exc:
+            return False, "backup failed, task left as it was: %s: %s" % (type(exc).__name__, exc)
+        note = "previous task in %s" % backup_dir
+        was_loaded = self.is_loaded(label)
+        done, detail = self.install(label)
+        if not done:
+            return False, "%s; %s" % (detail, note)
+        if was_loaded and self._long_lived(label):
+            self._call("/End", "/TN", label)
+            rc, out, err = self._call("/Run", "/TN", label)
+            return rc == 0, "; ".join(x for x in (note, (err or out).strip()) if x)
+        return True, "rewritten; " + note
+
+
+class LogNotifier:
+    """No desktop notification, one line on stderr instead (the job's log under Task Scheduler,
+    through jobrun.py). The guardian's alerts still reach the mail queue and the status. It is also
+    what WindowsToastNotifier falls back to, so an alert is never lost."""
+
+    def __init__(self, stream=None):
+        self.stream = stream
+
+    def notify(self, title: str, message: str) -> None:
+        try:
+            stream = self.stream or _sys_platform.stderr
+            if stream:
+                stream.write("notification: %s: %s\n" % (title, message))
+        except Exception:
+            pass
+
+
+TOAST_APP_ID = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
+
+
+# PowerShell reads ' and the typographic single quotes U+2018-U+201B alike as the delimiter of a
+# single-quoted string: a ’ in an alert's text would end the string and run the rest as code.
+PS_SINGLE_QUOTES = "'\u2018\u2019\u201a\u201b"
+
+
+def _ps_quote(s: str) -> str:
+    """A PowerShell single-quoted string: only its quote characters are special, and each is doubled."""
+    return "'" + "".join(c + c if c in PS_SINGLE_QUOTES else c for c in str(s)) + "'"
+
+
+def _xml_escape(s: str) -> str:
+    """XML text, with the typographic single quotes as numeric references so none reaches PowerShell."""
+    s = (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+         .replace('"', "&quot;").replace("'", "&apos;"))
+    return "".join("&#x%X;" % ord(c) if c in PS_SINGLE_QUOTES else c for c in s)
+
+
+def toast_script(title: str, message: str, app_id: str = TOAST_APP_ID) -> str:
+    """The PowerShell that shows a ToastText02 toast (headline + body) under Windows PowerShell's own
+    AppUserModelID, which every Windows already has registered. Title and message are XML-escaped
+    into the toast XML, and the whole XML is then quoted as one PowerShell single-quoted string (a
+    ' is doubled). Newlines become spaces: a line break inside -Command would end the statement."""
+    flat = lambda t: _xml_escape(" ".join(str(t).split()))
+    xml = ("<toast><visual><binding template='ToastText02'><text id='1'>%s</text><text id='2'>%s</text>"
+           "</binding></visual></toast>" % (flat(title), flat(message)))
+    return (
+        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; "
+        "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null; "
+        "$x = New-Object Windows.Data.Xml.Dom.XmlDocument; $x.LoadXml(%s); "
+        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier(%s).Show("
+        "[Windows.UI.Notifications.ToastNotification]::new($x))" % (_ps_quote(xml), _ps_quote(app_id)))
+
+
+class WindowsToastNotifier:
+    """A Windows toast through powershell.exe, stdlib only. Best effort, and never silent: when
+    PowerShell cannot run, times out or exits non-zero, the alert goes to `fallback` (the log line)."""
+
+    def __init__(self, run=subprocess.run, powershell="powershell.exe", timeout=10, fallback=None):
+        self.run, self.powershell, self.timeout = run, powershell, timeout
+        self.fallback = fallback or LogNotifier()
+
+    def argv(self, title: str, message: str) -> list:
+        return [self.powershell, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+                "-Command", toast_script(title, message)]
+
+    def notify(self, title: str, message: str) -> None:
+        shown = False
+        try:
+            p = self.run(self.argv(title, message), capture_output=True, text=True, timeout=self.timeout,
+                         stdin=subprocess.DEVNULL, creationflags=osproc.CREATE_NO_WINDOW)
+            shown = getattr(p, "returncode", 1) == 0
+        except Exception:
+            shown = False
+        if not shown:
+            try:
+                self.fallback.notify(title, message)
+            except Exception:
+                pass
+
+
 class NotifySendNotifier:
     """A desktop notification on Linux, through notify-send. Best effort, like OsascriptNotifier."""
 
@@ -1110,23 +1507,26 @@ class NotifySendNotifier:
 
 
 def default_notifier(platform=None, which=shutil.which):
-    """osascript on macOS, notify-send elsewhere."""
+    """osascript on macOS, a toast through PowerShell (log line when that fails) on Windows,
+    notify-send elsewhere."""
     import sys as _sys
 
     if (platform or _sys.platform) == "darwin":
         return OsascriptNotifier()
+    if (platform or _sys.platform) == "win32":
+        return WindowsToastNotifier()
     return NotifySendNotifier(notify_send=which("notify-send") or "notify-send")
 
 
 # ---------------------------------------------------------------- first-run consent
 
 JOBS = ("guardian", "sync", "tasks", "watch")
-SCHEDULERS = ("launchd", "systemd", "cron")
+SCHEDULERS = ("launchd", "systemd", "cron", "schtasks")
 # The Remote Control server is not a periodic job: it is accepted in its own first-run step and
 # only a supervisor that restarts a long-lived process can keep it (launchd KeepAlive, systemd
-# Restart=always). Cron cannot.
+# Restart=always, a Task Scheduler logon task with RestartOnFailure). Cron cannot.
 REMOTE_CONTROL = "remote-control"
-SUPERVISORS = ("launchd", "systemd")
+SUPERVISORS = ("launchd", "systemd", "schtasks")
 
 
 def first_run_state_path(state_dir=None) -> str:
@@ -1160,11 +1560,14 @@ def job_label(kind: str, job: str) -> str:
 
 
 def build_job_control(vault, state_dir=None, home=HOME):
-    """The scheduler adapter for what the user accepted: launchd, systemd user units or cron."""
+    """The scheduler adapter for what the user accepted: launchd, systemd user units, cron or Task Scheduler."""
     kind, jobs = consented_jobs(first_run_state_path(state_dir))
     labels = [job_label(kind, j) for j in jobs]
     if kind == "systemd":
         return SystemdUserControl(vault=vault, home=home, allowed=labels)
     if kind == "cron":
         return CronControl(vault=vault, home=home, allowed=labels)
+    if kind == "schtasks":
+        return SchtasksControl(vault=vault, home=home, allowed=labels,
+                               tasks_dir=os.path.join(state_dir or default_state_dir(), "schtasks"))
     return LaunchctlControl(vault=vault, home=home, allowed=labels)

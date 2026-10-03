@@ -43,6 +43,13 @@ def scratch():
            "BRAIN_STATE": paths["state"], "BRAIN_VAULT": paths["vault"],
            "PYTHONDONTWRITEBYTECODE": "1", "GIT_CEILING_DIRECTORIES": root,
            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    if sys.platform == "win32":      # a Python without SYSTEMROOT cannot start; home and temp stay scratch
+        import osproc
+        base = osproc.windows_base_env()
+        base.update({"USERPROFILE": paths["home"], "TEMP": root, "TMP": root, "APPDATA": paths["home"],
+                     "LOCALAPPDATA": paths["home"]})
+        env.update({k: v for k, v in base.items() if k not in env})
+        env.update({"USERPROFILE": paths["home"], "TEMP": root, "TMP": root})
     return env, paths
 
 

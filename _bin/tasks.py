@@ -71,7 +71,6 @@ import argparse
 import contextlib
 import datetime as dt
 import errno
-import fcntl
 import json
 import os
 import re
@@ -92,6 +91,8 @@ VAULT = Path(os.environ.get("BRAIN_VAULT") or Path(__file__).resolve().parent.pa
 REGISTRY = VAULT / "90-Meta" / "scheduled-tasks.md"
 # Resolved like brainlib.STATE: the legacy ~/.claude/state/brain until it is migrated.
 import brain_paths  # noqa: E402
+import oslock  # noqa: E402
+import osproc  # noqa: E402
 
 STATE_DIR = Path(brain_paths.effective_state_dir())
 STATE_FILE = STATE_DIR / "tasks-state.json"
@@ -187,7 +188,7 @@ def _lock(fh, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while True:
         try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            oslock.lock(fh.fileno(), blocking=False)
             return True
         except OSError as exc:
             if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
@@ -239,7 +240,7 @@ def _write_atomically(path, text: str) -> None:
         with os.fdopen(fd, "w") as fh:
             fh.write(text)
             fh.flush()
-            os.fchmod(fh.fileno(), mode)
+            osproc.chmod_fd(fh, mode, tmp)          # os.fchmod is POSIX-only before Python 3.13
             os.fsync(fh.fileno())
         os.replace(tmp, path)
     except BaseException:

@@ -34,8 +34,9 @@ def world():
     legacy = os.path.join(home, ".claude", "state", "brain")
     sys.path.insert(0, HERE)
     import brain_paths
-    new = brain_paths.state_dir(environ={}, home=home)          # this platform's default
-    env = dict(os.environ, HOME=home, BRAIN_KP_DB=os.path.join(root, "no.kdbx"),
+    local = os.path.join(home, "AppData", "Local")              # Windows: where the default state lives
+    new = brain_paths.state_dir(environ={"LOCALAPPDATA": local}, home=home)   # this platform's default
+    env = dict(os.environ, HOME=home, USERPROFILE=home, LOCALAPPDATA=local, XDG_STATE_HOME="", BRAIN_KP_DB=os.path.join(root, "no.kdbx"),
                BRAIN_VAULT=os.path.join(root, "vault"))
     for k in ("BRAIN_STATE", "BRAIN_KP_STATE"):
         env.pop(k, None)
@@ -67,7 +68,8 @@ def main():
     home, legacy, new, env = world()
     os.makedirs(new)
     os.makedirs(os.path.dirname(legacy))
-    os.symlink(new, legacy)
+    import oslink
+    oslink.make_dir_link(new, legacy)
     lines, err = probe(env, CODE)
     check("after migration (legacy linked to the new directory) they all use the new one", expect(lines, new),
           (lines, err[-300:]))

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import copy
 import json
+import ntpath
+import posixpath
 import os
 import re
 
@@ -35,10 +37,11 @@ JOBS = (
     ("tasks", "every 10 min: run the periodic tasks in 90-Meta/scheduled-tasks.md"),
     ("watch", "every minute: fire file events (reindex, link repair, sync debounce)"),
 )
-SCHEDULERS = ("launchd", "systemd", "cron")
+SCHEDULERS = ("launchd", "systemd", "cron", "schtasks")
 # The Remote Control server is a long-lived process, not a periodic job: only a supervisor that restarts it
-# can keep it (launchd KeepAlive, systemd Restart=always). It has its own step, not a row in JOBS.
-SUPERVISORS = ("launchd", "systemd")
+# can keep it (launchd KeepAlive, systemd Restart=always, a Task Scheduler logon task with RestartOnFailure).
+# It has its own step, not a row in JOBS.
+SUPERVISORS = ("launchd", "systemd", "schtasks")
 REMOTE_CONTROL_JOB = "remote-control"
 
 _EMAIL = re.compile(r"[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+")
@@ -123,16 +126,19 @@ def valid_email(address) -> bool:
 
 
 def default_kdbx_path(platform: str, home: str) -> str:
-    if platform == "darwin":
+    if platform in ("darwin", "win32"):
         return os.path.join(home, "Documents", "brain.kdbx")
     return os.path.join(home, ".local", "share", "brain", "brain.kdbx")
 
 
 def detect_scheduler(platform: str, which, environ) -> str:
-    """launchd on macOS; systemd user units on Linux when there is a user session to run them; cron where
-    systemd is absent; "none" when there is nothing to schedule with."""
+    """launchd on macOS; Task Scheduler (schtasks.exe, per-user tasks) on Windows; systemd user units on Linux
+    when there is a user session to run them; cron where systemd is absent; "none" when there is nothing to
+    schedule with."""
     if platform == "darwin":
         return "launchd"
+    if platform == "win32":
+        return "schtasks" if which("schtasks") else "none"
     if which("systemctl") and (environ.get("XDG_RUNTIME_DIR") or environ.get("DBUS_SESSION_BUS_ADDRESS")):
         return "systemd"
     if which("crontab"):
@@ -149,18 +155,35 @@ def scheduler_state(kind: str, jobs) -> dict:
     return {"kind": kind, "jobs": list(jobs)}
 
 
-def mcp_snippets(vault: str, python: str = "python3") -> dict:
+def mcp_command(vault: str, python: str = "python3", platform=None, executable=None):
+    """(command, args, vault) of the MCP server entry in every client config. POSIX: the interpreter named
+    and the server path as they are. Windows: `executable` (this machine's python.exe) with `-X utf8`, so the
+    server reads and writes the vault's notes as UTF-8, and backslash paths."""
+    join = os.path.join if platform is None else (ntpath.join if platform == "win32" else posixpath.join)
+    server = join(vault, "integrations", "mcp", "server.py")
+    if platform == "win32":
+        return (ntpath.normpath(executable or "python"), ["-X", "utf8", ntpath.normpath(server)],
+                ntpath.normpath(vault))
+    return python, [server], vault
+
+
+def mcp_snippets(vault: str, python: str = "python3", platform=None, executable=None) -> dict:
     """How to register the vault's MCP server with common agents. Printed for the user, never written
     into another program's config by the first run."""
-    server = os.path.join(vault, "integrations", "mcp", "server.py")
+    command, args, vault_path = mcp_command(vault, python, platform, executable)
+    if platform == "win32":
+        claude_code = "claude mcp add brain -- " + " ".join(
+            ['"%s"' % command] + [a if a == "-X" or a == "utf8" else '"%s"' % a for a in args])
+    else:
+        claude_code = "claude mcp add brain -- %s %s" % (command, args[0])
     return {
-        "claude-code": "claude mcp add brain -- %s %s" % (python, server),
-        "claude-desktop": json.dumps({"mcpServers": {"brain": {"command": python, "args": [server]}}}, indent=2),
-        "json-clients": json.dumps({"mcpServers": {"brain": {"command": python, "args": [server],
-                                                             "env": {"BRAIN_VAULT": vault}}}}, indent=2),
+        "claude-code": claude_code,
+        "claude-desktop": json.dumps({"mcpServers": {"brain": {"command": command, "args": args}}}, indent=2),
+        "json-clients": json.dumps({"mcpServers": {"brain": {"command": command, "args": args,
+                                                             "env": {"BRAIN_VAULT": vault_path}}}}, indent=2),
         "opencode": json.dumps({"$schema": "https://opencode.ai/config.json",
-                                "mcp": {"brain": {"type": "local", "command": [python, server], "enabled": True,
-                                                  "environment": {"BRAIN_VAULT": vault}}}}, indent=2),
+                                "mcp": {"brain": {"type": "local", "command": [command] + args, "enabled": True,
+                                                  "environment": {"BRAIN_VAULT": vault_path}}}}, indent=2),
     }
 
 
@@ -230,6 +253,9 @@ def verify_text(label: str, kind: str) -> str:
     """How to see the server is up, and how to prove it from the phone."""
     if kind == "systemd":
         log = "systemctl --user status %s; journalctl --user -u %s" % ((job_label(kind, REMOTE_CONTROL_JOB),) * 2)
+    elif kind == "schtasks":
+        log = ("schtasks /Query /TN %s /V /FO LIST; the log, %%LOCALAPPDATA%%\\brain\\logs\\%s.log,"
+               % ((job_label(kind, REMOTE_CONTROL_JOB),) * 2))
     else:
         log = ("launchctl list %s; the log, ~/Library/Application Support/brain/logs/remote-control.log,"
                % job_label(kind, REMOTE_CONTROL_JOB))

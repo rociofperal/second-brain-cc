@@ -170,7 +170,7 @@ def test_kdbx_and_google():
                                                                # remote_control, routines
     p = ports(answers, kdbx=Recorder(configured="", exists=False))
     A.run(p)
-    db = "/home/u/.local/share/brain/brain.kdbx"
+    db = os.path.join("/home/u", ".local", "share", "brain", "brain.kdbx")
     check("the database is created at the default path after a yes",
           ("init", db, True) in p.kdbx.calls and ("unlock",) in p.kdbx.calls, p.kdbx.calls)
     check("the kdbx step records the database", p.state.data["steps"]["kdbx"].get("db") == db, p.state.data["steps"]["kdbx"])

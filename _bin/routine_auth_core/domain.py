@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import json
+import os
 import re
 from dataclasses import dataclass
 
@@ -421,7 +422,10 @@ def expiry_findings(entries, now: dt.datetime, warn_days=30) -> list:
 
 # Where the Claude Desktop app keeps its own copies of the CLI. A routine never runs one:
 # that copy follows the app's login and updates, which is exactly what routines must not.
-DESKTOP_CLI_PREFIXES = ("/Applications/Claude.app/", "{home}/Library/Application Support/Claude/")
+# Windows: the app keeps its copies under %APPDATA%\Claude and %LOCALAPPDATA%\AnthropicClaude (the
+# second is a best guess at the installer's folder); compared with slashes and without case there.
+DESKTOP_CLI_PREFIXES = ("/Applications/Claude.app/", "{home}/Library/Application Support/Claude/",
+                        "{home}/AppData/Roaming/Claude/", "{home}/AppData/Local/AnthropicClaude/")
 FORBIDDEN_ARGS = ("--bare",)
 
 
@@ -440,26 +444,32 @@ def expand_home(tokens, home: str) -> list:
         if t == "~":
             out.append(home)
         elif t.startswith("~/"):
-            out.append(home.rstrip("/") + t[1:])
+            out.append(os.path.join(home, *t[2:].split("/")))
         else:
             out.append(t)
     return out
 
 
 def template_tokens(template: str, home: str) -> list:
-    import shlex
+    import osproc                        # shlex.split, keeping Windows paths whole
 
     try:
-        return expand_home(shlex.split(template or ""), home)
+        return expand_home(osproc.split_command(template or ""), home)
     except ValueError:
         return []
 
 
 def cli_path_problem(resolved: str, real: str, home: str):
     """Why this CLI path must not run routines, or None."""
-    prefixes = [p.format(home=home.rstrip("/")) for p in DESKTOP_CLI_PREFIXES]
+    windows = "\\" in (resolved or "") + (real or "") + (home or "") or (home or "")[1:3] == ":/"
+
+    def norm(p):
+        p = (p or "").replace("\\", "/")
+        return p.lower() if windows else p
+
+    prefixes = [norm(p.format(home=norm(home).rstrip("/"))) for p in DESKTOP_CLI_PREFIXES]
     for path in (resolved, real):
-        if any((path or "").startswith(p) for p in prefixes):
+        if any(norm(path).startswith(p) for p in prefixes):
             return ("%s is the Claude Desktop app's own copy of the CLI (it follows the app's login and "
                     "updates). Install the standalone CLI with the official installer and point "
                     "90-Meta/agent-command.txt at ~/.local/bin/claude" % real)

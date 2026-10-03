@@ -34,7 +34,7 @@ def tmpdir():
 
 def write(path, text="x", mtime=None, mode=None):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as fh:
+    with open(path, "w", newline="\n") as fh:     # no CRLF translation: byte offsets are asserted
         fh.write(text)
     if mtime is not None:
         os.utime(path, (mtime, mtime))
@@ -43,8 +43,14 @@ def write(path, text="x", mtime=None, mode=None):
     return path
 
 
+GIT = "/usr/bin/git" if os.path.exists("/usr/bin/git") else (shutil.which("git") or "git")
+# /bin/echo and /bin/sleep do not exist on Windows: the interpreter does the same job there
+ECHO = ["/bin/echo"] if os.path.exists("/bin/echo") else [sys.executable, "-c", "import sys; print(*sys.argv[1:])"]
+SLEEP5 = ["/bin/sleep", "5"] if os.path.exists("/bin/sleep") else [sys.executable, "-c", "import time; time.sleep(5)"]
+
+
 def git(cwd, *args):
-    return subprocess.run(["/usr/bin/git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+    return subprocess.run([GIT, "-c", "user.name=t", "-c", "user.email=t@example.com",
                            "-c", "init.defaultBranch=main"] + list(args),
                           cwd=cwd, capture_output=True, text=True)
 
@@ -78,11 +84,11 @@ def test_state_runner_files():
     check("corrupt watch state loads as empty", AD.JsonWatchState(path).load() == {})
 
     r = AD.SubprocessRunner()
-    rc, out, err = r.run(["/bin/echo", "hello", "two words"], timeout=10)
+    rc, out, err = r.run(ECHO + ["hello", "two words"], timeout=10)
     check("a command runs as argv and its output comes back", rc == 0 and out.strip() == "hello two words", (rc, out, err))
     rc, _, err = r.run(["/nonexistent/tool"], timeout=10)
     check("a missing command is exit 127, not an exception", rc == 127 and err, (rc, err))
-    rc, _, _ = r.run(["/bin/sleep", "5"], timeout=1)
+    rc, _, _ = r.run(SLEEP5, timeout=1)
     check("a command past its timeout is exit 124", rc == 124, rc)
 
     v = tmpdir()
@@ -93,7 +99,10 @@ def test_state_runner_files():
     check("a written file has its content", files.read("githooks/pre-commit") == "#!/bin/sh\nexit 0\n")
     check("and is executable when asked", os.access(full, os.X_OK))
     files.write("AGENTS.md", "hello\n")
-    check("a plain file is not executable", not os.access(os.path.join(v, "AGENTS.md"), os.X_OK))
+    if sys.platform == "win32":
+        print("  skipped on Windows: a plain file is not executable (Windows has no execute bit; os.access says yes)")
+    else:
+        check("a plain file is not executable", not os.access(os.path.join(v, "AGENTS.md"), os.X_OK))
     check("no temporary file is left behind", not [f for f in os.listdir(os.path.join(v, "githooks")) if f.endswith(".tmp")])
     check("the clock returns epoch seconds", AD.SystemClock().now() > 1.7e9)
 
@@ -156,7 +165,7 @@ def test_git_probe():
     check("uncommitted files count from their oldest mtime",
           probe.oldest_unsynced_mtime() == 1_700_000_000.0, probe.oldest_unsynced_mtime())
     git(vault, "add", "-A")
-    git(vault, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "two")
+    git(vault, "-c", "core.hooksPath=" + os.devnull, "commit", "-qm", "two")
     t = probe.oldest_unsynced_mtime()
     check("committed but unpushed work counts from the commit time", t is not None and t > 1_700_000_500, t)
     probe_lone = AD.GitUnsyncedProbe(tmpdir())
@@ -188,7 +197,7 @@ def test_main_log_reader():
     cursor = os.path.join(d, "state", "main-log-cursor.json")
     text, fresh = AD.MainLogReader(log, cursor).read_new()
     check("the first read is fresh and returns the log", fresh is True and "old line 2" in text, (text, fresh))
-    with open(log, "a") as fh:
+    with open(log, "a", newline="") as fh:
         fh.write("new line 3\n")
     text, fresh = AD.MainLogReader(log, cursor).read_new()
     check("the next read returns only what was appended", text == "new line 3\n" and fresh is False, (text, fresh))

@@ -35,7 +35,7 @@ The one-screen version. Full protocol: `~/Brain/90-Meta/AGENT-PROTOCOL.md`.
 - Never edit a gate to get past it: stop and ask. Smoke checks redirect every state path, not just the input.
 - Headless runs: the prompt is an order to execute now; success is judged from a log the code writes, never the model's last words.
 - Your tools: `30-Knowledge/2026-09-12-reference-tool-and-service-catalogue.md`. Read it before calling a capability missing; verify a newly granted tool or key with a real call and add it there.
-- Supported: macOS and Linux, each with its own Chrome and the Claude extension. What this machine has: the `## This machine` block or a probe, never the OS.
+- Supported: macOS, Linux and Windows (Task Scheduler for scheduled jobs, Python with `-X utf8`, Git for Windows), each with its own Chrome and the Claude extension. What this machine has: the `## This machine` block or a probe, never the OS.
 - A scheduled task moves to a machine only once `routine_requires.py here --fix` is ✓ there. Protocol §10.
 - Every search also repairs broken `[[links]]` (`linkfix.py`). Links it cannot fix are shown to you: fix them in that session.
 - Before creating a new project: check whether the task belongs to an existing one and say so; if it doesn't fit, ASK.

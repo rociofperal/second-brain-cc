@@ -38,6 +38,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 VAULT = os.path.abspath(os.environ.get("BRAIN_VAULT") or os.path.dirname(os.path.dirname(HERE)))
 BIN = os.path.join(VAULT, "_bin")
 PY = sys.executable or "/usr/bin/python3"
+# Windows reads and writes files in the ANSI code page unless Python runs in UTF-8 mode; the vault is UTF-8.
+PY_ARGV = [PY, "-X", "utf8"] if sys.platform == "win32" else [PY]
 
 
 def die(msg, code=1):
@@ -55,14 +57,24 @@ def script(name):
 def session_env():
     env = dict(os.environ)
     env["BRAIN_VAULT"] = VAULT
+    if sys.platform == "win32":
+        env["PYTHONUTF8"] = "1"
     if not (env.get("BRAIN_SESSION_ID") or "").strip():
         env["BRAIN_SESSION_ID"] = "cli-%d" % os.getpid()
     return env
 
 
+def _exec(argv, env):
+    """Replace this process with argv (POSIX). Windows has no real exec: os.execve there starts the
+    program and exits at once with 0, losing its exit code, so run it and pass the code on."""
+    if sys.platform == "win32":
+        sys.exit(subprocess.call(argv, env=env))
+    os.execve(argv[0], argv, env)
+
+
 def exec_script(name, args):
     """Replace this process with the target script, inheriting stdio and the session id."""
-    os.execve(PY, [PY, script(name)] + args, session_env())
+    _exec(PY_ARGV + [script(name)] + args, session_env())
 
 
 def with_sid(args, env):
@@ -71,7 +83,7 @@ def with_sid(args, env):
 
 def run_script(argv, payload, env):
     """One handler, run with the vault as cwd and the hook JSON object on stdin."""
-    return subprocess.run([PY] + argv, input=json.dumps(payload), env=env, cwd=VAULT, capture_output=True, text=True)
+    return subprocess.run(PY_ARGV + argv, input=json.dumps(payload), env=env, cwd=VAULT, capture_output=True, text=True)
 
 
 def run_hook(name):
@@ -237,7 +249,7 @@ def main(argv):
             server = os.path.join(os.path.dirname(HERE), "mcp", "server.py")
         if not os.path.isfile(server):
             die("MCP server not found at %s" % server)
-        os.execve(PY, [PY, server] + rest, session_env())
+        _exec(PY_ARGV + [server] + rest, session_env())
     die("unknown command: %s (try `brain help`)" % cmd, 2)
 
 

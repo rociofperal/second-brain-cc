@@ -23,6 +23,13 @@ bash integrations/claude-code/install.sh   # skills, agents, hooks, recommended 
 bash integrations/first-run/setup.sh       # optional pieces, one yes at a time
 ```
 
+On Windows run the same three steps as `bootstrap.ps1`, `integrations\claude-code\install.ps1` and
+`integrations\first-run\setup.ps1` (PowerShell; see the README's Windows section). `install.ps1` is a thin
+entry to `install.py`, which does what `install.sh` does. On Windows the hooks, and the Python a skill runs,
+are written as `"<python.exe>" -X utf8 "<vault>\_bin\<script>.py"`: Claude Code runs hook commands
+through a shell (Git Bash, or cmd), and a double-quoted backslash path reads the same in both; UTF-8 mode
+keeps Python from using the ANSI code page on the vault's notes.
+
 `install.sh`:
 
 1. installs the skills and agents into `~/.claude` with `_bin/install_plugin.py install`. The vault's

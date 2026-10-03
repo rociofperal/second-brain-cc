@@ -50,6 +50,16 @@ def resolve_vault(argv):
 VAULT = resolve_vault(sys.argv[1:])
 BIN = os.path.join(VAULT, "_bin")
 PY = sys.executable or "/usr/bin/python3"
+# Windows reads and writes files in the ANSI code page unless Python runs in UTF-8 mode, and the vault is UTF-8:
+# the scripts this server starts, and its own stdio, are put in that mode.
+WIN = sys.platform == "win32"
+PY_ARGV = [PY, "-X", "utf8"] if WIN else [PY]
+if WIN:
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_INFO = {"name": "brain", "version": "1.0.0"}
 
@@ -67,8 +77,11 @@ def log(*a):
 def run(args, stdin_text=None, timeout=120):
     """Run a _bin script and return (ok, stdout, stderr)."""
     try:
-        p = subprocess.run([PY] + args, input=stdin_text if stdin_text is not None else "", capture_output=True,
-                           text=True, env=dict(os.environ), cwd=VAULT, timeout=timeout)
+        env = dict(os.environ)
+        if WIN:
+            env["PYTHONUTF8"] = "1"
+        p = subprocess.run(PY_ARGV + args, input=stdin_text if stdin_text is not None else "", capture_output=True,
+                           text=True, env=env, cwd=VAULT, timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, "", "timed out after %ss" % timeout
     except Exception as e:

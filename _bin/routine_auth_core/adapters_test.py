@@ -18,6 +18,9 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[0] = os.path.dirname(HERE)
+from testbin import fake_exe  # noqa: E402  fake CLIs that also run on Windows
+
+IS_WINDOWS = sys.platform == "win32"
 
 ok, fail = [], []
 TMP = []
@@ -59,7 +62,11 @@ if mode == "nodb":
 if mode == "hang":
     time.sleep(30)
 pipe = sys.argv[sys.argv.index("--pipe") + 1]
-p = subprocess.run(["/bin/sh", "-c", pipe], input=os.environ.get("FAKE_KP_VALUE", "") + "\n", text=True)
+# the same as kp.py get --pipe: /bin/sh on POSIX, cmd.exe on Windows
+if sys.platform == "win32":
+    p = subprocess.run(pipe, shell=True, input=(os.environ.get("FAKE_KP_VALUE", "") + "\n").encode("utf-8"))
+else:
+    p = subprocess.run(["/bin/sh", "-c", pipe], input=os.environ.get("FAKE_KP_VALUE", "") + "\n", text=True)
 sys.exit(p.returncode)
 '''
 
@@ -181,8 +188,7 @@ exit 0
 
 def fake_cli(root, name="claude", version='echo "2.1.0 (Claude Code)"'):
     calls, envs = os.path.join(root, name + ".calls"), os.path.join(root, name + ".envs")
-    path = write(os.path.join(root, "bin", name), FAKE_CLI % {"calls": calls, "envs": envs, "version": version},
-                 mode=0o755)
+    path = fake_exe(os.path.join(root, "bin", name), FAKE_CLI % {"calls": calls, "envs": envs, "version": version})
     return path, calls, envs
 
 
@@ -205,10 +211,19 @@ def test_cli_resolver(A, D):
     check("the health check runs once per process, not per routine",
           len(open(calls).read().splitlines()) == 1, open(calls).read())
 
+    import types
+    ran = []
+    st = A.CliResolver("agent -p {prompt}", home=root, which=lambda n, path=None: "C:\\bin\\agent.cmd",
+                       run=lambda *a, **k: ran.append(a) or types.SimpleNamespace(returncode=0, stdout="1.0", stderr="")
+                       ).check()
+    check("a CLI that is a .cmd is healthy when it answers --version (only the run judges its arguments)",
+          st.ok and len(ran) == 1, st)
+
     st = A.CliResolver("~/bin/claude -p {prompt}", home=root).check()
     check("a ~ path in the template resolves under the home directory", st.ok and st.path == cli, st)
     st = A.CliResolver("claude -p {prompt}", home=root, env_path=os.path.join(root, "bin")).check()
-    check("a bare name resolves on the given PATH", st.ok and st.path == cli, st)
+    check("a bare name resolves on the given PATH (Windows paths compare case-insensitively: which() reports .CMD)",
+          st.ok and os.path.normcase(st.path) == os.path.normcase(cli), st)
 
     st = A.CliResolver("", home=root).check()
     check("no template is unhealthy, saying so", not st.ok and "no agent command configured" in st.detail, st)
@@ -225,14 +240,18 @@ def test_cli_resolver(A, D):
     bundle = write(os.path.join(root, "Library", "Application Support", "Claude", "claude-code", "2.1.0", "claude"),
                    FAKE_CLI % {"calls": calls, "envs": envs, "version": "echo 2.1.0"}, mode=0o755)
     link = os.path.join(root, "bin", "desktop-claude")
-    os.symlink(bundle, link)
-    st = A.CliResolver("%s -p {prompt}" % link, home=root).check()
-    check("a symlink into the Claude Desktop app's copy is refused", not st.ok and "Desktop" in st.detail, st)
+    try:
+        os.symlink(bundle, link)
+    except OSError as exc:          # Windows without the symlink privilege
+        print("  - a symlink into the Claude Desktop app's copy (skipped: cannot make a symlink here: %s)" % exc)
+    else:
+        st = A.CliResolver("%s -p {prompt}" % link, home=root).check()
+        check("a symlink into the Claude Desktop app's copy is refused", not st.ok and "Desktop" in st.detail, st)
 
     broken, _, _ = fake_cli(root, "broken", version='echo "boom" >&2; exit 3')
     st = A.CliResolver("%s -p {prompt}" % broken, home=root).check()
     check("a CLI whose --version fails is unhealthy with the exit code", not st.ok and "3" in st.detail, st)
-    hang, _, _ = fake_cli(root, "hang", version="sleep 30")
+    hang, _, _ = fake_cli(root, "hang", version="sleep 5")
     st = A.CliResolver("%s -p {prompt}" % hang, home=root, timeout=1).check()
     check("a CLI whose --version hangs is unhealthy, not a hung runner", not st.ok and "1s" in st.detail, st)
 
@@ -245,21 +264,40 @@ pwd > "%(pwd)s"
 '''
 
 
+# Windows: the same in Python. A batch launcher cannot carry a multi-line argument, and sh's pwd
+# prints an MSYS /c/... path.
+ATTEMPT_PY = r'''#!/usr/bin/env python3
+import os, shutil, sys, time
+with open(%(args)r, "w") as fh:
+    fh.write("".join(a + "\n" for a in sys.argv[1:]))
+with open(%(env)r, "w") as fh:
+    fh.write("".join("%%s=%%s\n" %% kv for kv in os.environ.items()))
+with open(%(pwd)r, "w") as fh:
+    fh.write(os.getcwd() + "\n")
+%(body)s
+'''
+
+
+def attempt_cli(path, files, sh_body, py_body):
+    return fake_exe(path, ATTEMPT_PY % dict(files, body=py_body) if IS_WINDOWS else ATTEMPT_CLI % dict(files, body=sh_body))
+
+
 def test_cli_attempt(A, D):
     print("\n== CliAttempt ==")
     root = tmpdir()
     work = os.path.join(root, "work")
     os.makedirs(work)
     files = {k: os.path.join(root, k + ".txt") for k in ("args", "env", "pwd")}
-    write(os.path.join(root, "bin", "claude"), ATTEMPT_CLI % dict(files, body='echo \'{"total_cost_usd": 0.01}\''),
-          mode=0o755)
+    path_env = os.environ.get("PATH", "") if IS_WINDOWS else "/usr/bin:/bin"
+    attempt_cli(os.path.join(root, "bin", "claude"), files, 'echo \'{"total_cost_usd": 0.01}\'',
+                'print(\'{"total_cost_usd": 0.01}\')')
     prompt_tmp = os.path.join(root, "prompt-tmp")
     os.makedirs(prompt_tmp)
     os.environ["SOME_PARENT_VAR"] = "must-not-reach-the-cli"
     try:
         attempt = A.CliAttempt("~/bin/claude -p {prompt} --output-format json", cwd=work, home=root, tmp_dir=prompt_tmp)
         rc, out, err = attempt.run("Do the thing.", ["--add-dir", "~/work", "--allowedTools", "Bash,Read"],
-                                   {"HOME": root, "PATH": "/usr/bin:/bin", "CLAUDE_CODE_OAUTH_TOKEN": FAKE_TOKEN},
+                                   {"HOME": root, "PATH": path_env, "CLAUDE_CODE_OAUTH_TOKEN": FAKE_TOKEN},
                                    timeout=20)
     finally:
         os.environ.pop("SOME_PARENT_VAR", None)
@@ -270,11 +308,13 @@ def test_cli_attempt(A, D):
     check("the prompt's temporary file is removed after the run", os.listdir(prompt_tmp) == [], os.listdir(prompt_tmp))
     copy = os.path.join(root, "prompt-copy.txt")
     reader_files = {k: v + ".reader" for k, v in files.items()}    # the checks below still read the first run's
-    write(os.path.join(root, "bin", "reader"), ATTEMPT_CLI % dict(reader_files, body='cat "$4" > "%s"' % copy),
-          mode=0o755)
+    reader = attempt_cli(os.path.join(root, "bin", "reader"), reader_files, 'cat "$4" > "%s"' % copy,
+                         "shutil.copyfile(sys.argv[4], %r)" % copy)
     framed = 'You are running the Brain routine "r" unattended.\n\n---\nnot frontmatter\n---\nLast line.'
-    rc, _, err = A.CliAttempt("~/bin/reader -p {prompt} --file {prompt_file}", cwd=work, home=root,
-                              tmp_dir=prompt_tmp).run(framed, [], {"PATH": "/usr/bin:/bin"}, timeout=20)
+    # Windows: the multi-line {prompt} goes straight to an interpreter, as it would to claude.exe; a .cmd cannot take it.
+    reader_cmd = ('"%s" "%s"' % (sys.executable, reader[:-len(".cmd")])) if IS_WINDOWS else "~/bin/reader"
+    rc, _, err = A.CliAttempt(reader_cmd + " -p {prompt} --file {prompt_file}", cwd=work, home=root,
+                              tmp_dir=prompt_tmp).run(framed, [], {"PATH": path_env}, timeout=20)
     check("{prompt_file} is a private file holding exactly the prompt text",
           rc == 0 and os.path.exists(copy) and open(copy).read().strip() == framed, (rc, err))
     check("and it is gone once the run ends", os.listdir(prompt_tmp) == [], os.listdir(prompt_tmp))
@@ -286,10 +326,66 @@ def test_cli_attempt(A, D):
     check("it runs in the given working directory",
           os.path.exists(files["pwd"]) and os.path.realpath(open(files["pwd"]).read().strip()) == os.path.realpath(work))
     check("stdout comes back for the classifier", '"total_cost_usd"' in out, out)
-    write(os.path.join(root, "bin", "slow"), ATTEMPT_CLI % dict(files, body="sleep 30"), mode=0o755)
-    rc, _, err = A.CliAttempt("~/bin/slow -p {prompt}", cwd=work, home=root).run("Do it.", [], {"PATH": "/usr/bin:/bin"},
+    attempt_cli(os.path.join(root, "bin", "slow"), files, "sleep 30", "time.sleep(30)")
+    rc, _, err = A.CliAttempt("~/bin/slow -p {prompt}", cwd=work, home=root).run("Do it.", [], {"PATH": path_env},
                                                                                  timeout=1)
     check("an attempt past its timeout is exit 124, killed", rc == 124 and "timed out" in err, (rc, err))
+
+
+def test_cli_attempt_batch(A, D):
+    print("\n== CliAttempt: a .cmd that is no npm shim never gets cmd.exe metacharacters (Windows) ==")
+    root = tmpdir()
+    launched = []
+
+    class Proc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "{}", ""
+
+    def popen(argv, **kw):
+        launched.append(argv)
+        return Proc()
+    agent = "C:\\bin\\agent.cmd"
+    opts = dict(popen=popen, platform="win32", isfile={agent}.__contains__, read=lambda p: "@echo off\r\n",
+                which=lambda n, path=None: agent, environ={"PATHEXT": ".EXE;.CMD"})
+    attempt = A.CliAttempt("agent -p {prompt}", cwd=root, home=root, tmp_dir=root, runner_options=opts)
+    for prompt in ("Say hi & calc.exe", "a | b", "echo %USERPROFILE%", 'run "x"', "one\ntwo"):
+        rc, _, err = attempt.run(prompt, [], {"PATH": "x"}, timeout=5)
+        check("refused, never started: %r" % prompt, rc == 126 and launched == [] and "cmd.exe" in err, (rc, err, launched))
+    rc, _, _ = attempt.run("Do the thing, carefully.", ["--allowedTools", "Bash,Read"], {"PATH": "x"}, timeout=5)
+    check("a plain prompt and plain arguments run", rc == 0 and launched == [[agent, "-p", "Do the thing, carefully.",
+                                                                              "--allowedTools", "Bash,Read"]], launched)
+    attempt = A.CliAttempt("agent --file {prompt_file}", cwd=root, home=root, tmp_dir=root, runner_options=opts)
+    rc, _, _ = attempt.run("Say hi & calc.exe | del %USERPROFILE%", [], {"PATH": "x"}, timeout=5)
+    check("{prompt_file} runs whatever the text holds: only its path is on the command line",
+          rc == 0 and launched[-1][:2] == [agent, "--file"], launched)
+
+
+def test_cli_attempt_npm_shim(A, D):
+    print("\n== CliAttempt: a claude.cmd npm shim runs as node + script on Windows ==")
+    root = tmpdir()
+    shim, cli = "C:\\npm\\claude.cmd", "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js"
+    text = '"%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n'
+    launched = []
+
+    class Proc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "{}", ""
+
+    def popen(argv, **kw):
+        launched.append(argv)
+        return Proc()
+    files = {shim, cli, "C:/npm/claude.cmd"}      # the template is split the POSIX way here: forward slashes
+    text_of = lambda p: text
+    opts = dict(popen=popen, platform="win32", isfile=files.__contains__, read=text_of,
+                which=lambda n, path=None: None, environ={"PATHEXT": ".EXE;.CMD"})
+    attempt = A.CliAttempt("C:/npm/claude -p {prompt}", cwd=root, home=root, tmp_dir=root, runner_options=opts)
+    rc, _, _ = attempt.run("Line one.\nLine two.", ["--output-format", "json"], {"PATH": "x"}, timeout=5)
+    check("a multi-line prompt reaches node + cli.js whole instead of going through cmd.exe",
+          rc == 0 and launched == [["node", cli, "-p", "Line one.\nLine two.", "--output-format", "json"]], launched)
 
 
 def test_scratch_dirs(A, D):
@@ -303,8 +399,11 @@ def test_scratch_dirs(A, D):
     path, exc = outcome(scratch.create, rid)
     check("a run's scratch directory is created under <brain state>/routine-scratch/<run id>",
           exc is None and path == os.path.join(base, rid) and os.path.isdir(path), (path, exc))
-    check("it is private (0700), and so is its parent",
-          path and stat.S_IMODE(os.stat(path).st_mode) == 0o700 and stat.S_IMODE(os.stat(base).st_mode) == 0o700)
+    if IS_WINDOWS:
+        print("  - it is private, mode 0700 (skipped on Windows: no POSIX mode bits; the profile folder's ACL applies)")
+    else:
+        check("it is private (0700), and so is its parent",
+              path and stat.S_IMODE(os.stat(path).st_mode) == 0o700 and stat.S_IMODE(os.stat(base).st_mode) == 0o700)
     _, exc = outcome(scratch.create, rid)
     check("the same run id never gets a directory twice", exc is not None, repr(exc))
     write(os.path.join(base, rid, "email.html"), "<p>draft</p>")
@@ -380,7 +479,7 @@ def main():
         check("routine_auth_core.adapters imports", False, "%s: %s" % (type(exc).__name__, exc))
     else:
         for t, args in ((test_kp_token_source, (A, D)), (test_pool_file, (A, D)), (test_state_store, (A,)),
-                        (test_raw_log, (A, D)), (test_cli_resolver, (A, D)), (test_cli_attempt, (A, D)),
+                        (test_raw_log, (A, D)), (test_cli_resolver, (A, D)), (test_cli_attempt, (A, D)), (test_cli_attempt_batch, (A, D)), (test_cli_attempt_npm_shim, (A, D)),
                         (test_scratch_dirs, (A, D)), (test_run_ids, (A, D)), (test_mail_sent_log, (A, D)),
                         (test_raw_log_run_id, (A, D))):
             try:

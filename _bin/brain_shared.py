@@ -26,7 +26,7 @@ CONFIG_NAME = "shared-dir.json"
 
 
 def _expand(value, home):
-    if value == "~" or value.startswith("~/"):
+    if value == "~" or value.startswith("~/") or value.startswith("~\\"):
         return home + value[1:]
     return value
 

@@ -56,7 +56,7 @@ def main():
         check("set_files_dir returns the file it wrote", written == cfg, written)
         check("the config file holds the directory under \"dir\"",
               json.load(open(cfg)) == {"dir": "/data/brain-files"}, open(cfg).read())
-        check("and is private (0600)", stat.S_IMODE(os.stat(cfg).st_mode) == 0o600,
+        check("and is private (0600)", (sys.platform == "win32" or stat.S_IMODE(os.stat(cfg).st_mode) == 0o600),
               oct(stat.S_IMODE(os.stat(cfg).st_mode)))
         check("no temporary file is left beside it", os.listdir(os.path.dirname(cfg)) == ["files-dir.json"],
               os.listdir(os.path.dirname(cfg)))
@@ -85,10 +85,10 @@ def main():
 
         print("\n== where the config file lives ==")
         got = BF.config_file(environ={"BRAIN_STATE": "/srv/state"}, home=home, platform="linux")
-        check("it sits in the Brain state directory", got == "/srv/state/files-dir.json", got)
+        check("it sits in the Brain state directory", got == os.path.join("/srv/state", "files-dir.json"), got)
         got = BF.config_file(environ={}, home="/home/x", platform="linux")
         check("which on Linux follows brain_paths: ~/.local/state/brain",
-              got == "/home/x/.local/state/brain/files-dir.json", got)
+              got == os.path.join("/home/x", ".local", "state", "brain", "files-dir.json"), got)
 
         state = os.path.join(tmp, "st")
         BF.set_files_dir("/from-default-path", config_path=BF.config_file(environ={"BRAIN_STATE": state}))
@@ -96,7 +96,7 @@ def main():
         check("with no config_path given both sides agree on the file", got == "/from-default-path", got)
 
         check("the proposed default is ~/BrainFiles on macOS and Linux alike",
-              BF.default_files_dir(home) == "/home/someone/BrainFiles", BF.default_files_dir(home))
+              BF.default_files_dir(home) == os.path.join(home, "BrainFiles"), BF.default_files_dir(home))
 
         check("the unconfigured message names the first-run step",
               "first_run.py" in BF.UNCONFIGURED and "files" in BF.UNCONFIGURED, BF.UNCONFIGURED)

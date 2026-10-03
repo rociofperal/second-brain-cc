@@ -62,7 +62,7 @@ def main():
         check("set_shared_dir returns the file it wrote", written == cfg, written)
         check("the config file holds the directory under \"dir\"",
               json.load(open(cfg)) == {"dir": "/data/brain-shared"}, open(cfg).read())
-        check("and is private (0600)", stat.S_IMODE(os.stat(cfg).st_mode) == 0o600,
+        check("and is private (0600)", (sys.platform == "win32" or stat.S_IMODE(os.stat(cfg).st_mode) == 0o600),
               oct(stat.S_IMODE(os.stat(cfg).st_mode)))
         check("no temporary file is left beside it", os.listdir(os.path.dirname(cfg)) == ["shared-dir.json"],
               os.listdir(os.path.dirname(cfg)))
@@ -92,10 +92,10 @@ def main():
 
         print("\n== where the config file lives ==")
         got = BS.config_file(environ={"BRAIN_STATE": "/srv/state"}, home=home, platform="linux")
-        check("it sits in the Brain state directory", got == "/srv/state/shared-dir.json", got)
+        check("it sits in the Brain state directory", got == os.path.join("/srv/state", "shared-dir.json"), got)
         got = BS.config_file(environ={}, home="/home/x", platform="linux")
         check("which on Linux follows brain_paths: ~/.local/state/brain",
-              got == "/home/x/.local/state/brain/shared-dir.json", got)
+              got == os.path.join("/home/x", ".local", "state", "brain", "shared-dir.json"), got)
 
         state = os.path.join(tmp, "st")
         BS.set_shared_dir("/from-default-path", config_path=BS.config_file(environ={"BRAIN_STATE": state}))

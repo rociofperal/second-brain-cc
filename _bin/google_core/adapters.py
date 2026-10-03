@@ -183,7 +183,7 @@ class JsonlSendLog:
         folder = os.path.dirname(self.path)
         if folder:
             os.makedirs(folder, mode=0o700, exist_ok=True)
-        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
         try:
             os.write(fd, (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
         finally:

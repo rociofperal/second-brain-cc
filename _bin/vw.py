@@ -12,6 +12,7 @@ It does three things Write/Edit do not:
 import os, sys, time, argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import brainlib as B
+import osproc
 
 # Notes written in this run. They get reindexed at the end, OUTSIDE the flock:
 # doing it inside hung the process waiting on the database.
@@ -124,7 +125,7 @@ def cmd_append(args):
 
 def cmd_new(args):
     path = resolve(args.path)
-    body = sys.stdin.read() if not sys.stdin.isatty() else ""
+    body = sys.stdin.read() if not osproc.isatty(sys.stdin) else ""
     body, redacted = B.scrub_secrets(body)
     if redacted:
         sys.stderr.write("vw: " + B.redaction_notice(redacted))

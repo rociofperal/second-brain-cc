@@ -70,7 +70,7 @@ def main():
         check("its failures are counted and a file with no RESULT line counts as one more",
               "RESULT: 8 passed, 3 failed" in out, out)
         check("each failing file is named, and --verbose shows its output",
-              "FAIL _bin/d_test.py" in out and "no RESULT line" in out and "forgot the result line" in out, out)
+              "FAIL _bin/d_test.py" in out.replace("\\", "/") and "no RESULT line" in out and "forgot the result line" in out, out)
         rc, out = run(root, "-k", "core")
         check("-k runs only the files whose path matches", rc == 0 and "RESULT: 3 passed, 0 failed" in out, out)
         empty = tempfile.mkdtemp(prefix="run-all-tests-empty-")

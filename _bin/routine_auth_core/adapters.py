@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import datetime as dt
 import os
-import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 
+import osproc  # noqa: E402  (_bin is on the path: guardian_core needs it too)
 from guardian_core.adapters import JsonStateStore, atomic_write  # noqa: F401  (same atomic-write state file)
 
 from . import domain as D
@@ -55,8 +55,9 @@ class KpTokenSource:
         os.chmod(path, 0o600)
         reader = "import sys,os;open(os.environ['KPOUT'],'wb').write(sys.stdin.buffer.read())"
         env = dict(self.environ, KPOUT=path, BRAIN_KP_NOPROMPT="1")
+        env.update({k: v for k, v in osproc.windows_base_env().items() if k not in env})   # {} off Windows
         argv = [self.python, self.kp_path, "get", D.kp_entry(kp_ref), "-a", D.kp_attr(kp_ref),
-                "--pipe", '%s -c "%s"' % (self.python, reader)]
+                "--pipe", '%s -c "%s"' % ('"%s"' % self.python if sys.platform == "win32" else self.python, reader)]
         try:
             try:
                 p = self.run(argv, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
@@ -119,7 +120,8 @@ class CliResolver:
         self._status = None
 
     def _resolve(self, tok):
-        if "/" in tok:
+        if os.path.dirname(tok):                         # a path; on Windows claude means claude.exe / .cmd
+            tok = osproc.resolve_exe(tok)
             return tok if os.path.isfile(tok) and os.access(tok, os.X_OK) else None
         path = self.env_path or os.environ.get("PATH") or os.defpath
         return self.which(tok, path=path)
@@ -145,6 +147,7 @@ class CliResolver:
         if problem:
             return D.CliStatus(False, resolved, detail=problem)
         env = {"HOME": self.home, "PATH": os.environ.get("PATH") or os.defpath, "DISABLE_AUTOUPDATER": "1"}
+        env.update({k: v for k, v in osproc.windows_base_env().items() if k not in env})  # {} off Windows
         try:
             p = self.run([resolved, "--version"], env=env, stdin=subprocess.DEVNULL, capture_output=True,
                          text=True, timeout=self.timeout)
@@ -173,8 +176,9 @@ class CliAttempt:
     file, and it is removed when the run ends, however it ends.
     """
 
-    def __init__(self, template, cwd=None, home=None, tmp_dir=None):
+    def __init__(self, template, cwd=None, home=None, tmp_dir=None, runner_options=None):
         self.template, self.cwd = template, cwd
+        self.runner_options = dict(runner_options or {})     # platform=, isfile=, ... for CliAgentRunner
         self.home = home or os.path.expanduser("~")
         self.tmp_dir = tmp_dir
 
@@ -182,13 +186,15 @@ class CliAttempt:
         from guardian_core.adapters import CliAgentRunner
 
         tokens = D.template_tokens(self.template, self.home) + D.expand_home(list(agent_args or ()), self.home)
-        template = " ".join(shlex.quote(t) for t in tokens)
+        env = dict(env)
+        # Windows: what a process needs to start at all, where the given env lacks it ({} elsewhere).
+        env.update({k: v for k, v in osproc.windows_base_env().items() if k not in env})
         fd, path = tempfile.mkstemp(prefix="routine-prompt-", suffix=".md", dir=self.tmp_dir)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(prompt or "")
             os.chmod(path, 0o600)
-            return CliAgentRunner(template, cwd=self.cwd, env=dict(env)).run(path, timeout)
+            return CliAgentRunner(tokens, cwd=self.cwd, env=env, **self.runner_options).run(path, timeout)
         finally:
             if os.path.exists(path):
                 os.remove(path)

@@ -1,0 +1,7 @@
+{
+  "description": "Second Brain: Remote Control server, so the Claude app can reach this machine (remote_control.py serve). Starts at logon and is restarted when it exits with an error.",
+  "script": "_bin/remote_control.py",
+  "args": ["serve"],
+  "at_logon": true,
+  "cwd": "home"
+}

@@ -261,7 +261,7 @@ that group; the rest of the database is the user's and is never touched, not eve
   database open in another client, 6 no database.
 
 The vault stores no secrets, ever. This is a text convention (`kp://...`) plus a thin wrapper over
-`keepassxc-cli`; it works with any agent that can run a shell, on macOS and Linux. Detail:
+`keepassxc-cli`; it works with any agent that can run a shell, on macOS, Linux and Windows. Detail:
 `30-Knowledge/2026-08-20-decision-credentials-in-keepass.md`.
 
 
@@ -363,10 +363,10 @@ Detail and reasoning: `30-Knowledge/2026-08-21-convention-worktree-isolation-per
 - **Every session is told which machine it is on.** The `## This machine` block at startup
   (`_bin/machine_caps.py`) names the machine key, its scheduler, the tools on its PATH, whether its
   own Chrome is paired with Claude Code and which agent tasks run there. Decide what a machine can
-  do from that block or a probe, never from its OS alone. Every supported environment (macOS and
-  Linux) has its own Chrome with the Claude extension, and the block says whether this machine's is
+  do from that block or a probe, never from its OS alone. Every supported environment (macOS,
+  Linux and Windows) has its own Chrome with the Claude extension, and the block says whether this machine's is
   usable: `30-Knowledge/2026-09-21-reference-where-claude-in-chrome-is-available.md`. Skills and
-  scheduled tasks are written to work on both macOS and Linux, and generic content never names a
+  scheduled tasks are written to work on macOS, Linux and Windows (Task Scheduler there, Python with `-X utf8`, Git for Windows), and generic content never names a
   specific machine.
   `_bin/machines.py` keeps one record per machine (on the shared path when one is configured, never
   in the vault); every machine registers itself, at the end of its first run and once a day from the

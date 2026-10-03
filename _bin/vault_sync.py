@@ -358,6 +358,10 @@ def git_running(run=None, which=shutil.which):
     """True when any git process is alive on this machine. When in doubt, True."""
     try:
         import subprocess
+        if sys.platform == "win32" and run is None and which is shutil.which:
+            p = subprocess.run(["tasklist", "/FI", "IMAGENAME eq git.exe", "/NH"], capture_output=True, text=True,
+                               timeout=10)
+            return p.returncode != 0 or "git.exe" in p.stdout.lower()
         pgrep = which("pgrep")
         if not pgrep:
             return True

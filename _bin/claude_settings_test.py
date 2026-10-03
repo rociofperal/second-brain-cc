@@ -41,7 +41,7 @@ def test_merge(CS):
     print("\n== merge ==")
     user = {"permissions": {"defaultMode": "plan", "allow": ["Bash(ls *)", "Bash(git status*)"]}, "theme": "dark",
             "hooks": {"Stop": []}}
-    merged, changes = CS.merge(user, EX, "/srv/vault")
+    merged, changes = CS.merge(user, EX, "/srv/vault", platform="linux")
     check("a value the user already set is never changed", merged["permissions"]["defaultMode"] == "plan", merged)
     check("allow entries the user lacks are appended once, after theirs, with the vault path filled in",
           merged["permissions"]["allow"] == ["Bash(ls *)", "Bash(git status*)", "Bash(python3 /srv/vault/_bin/query.py *)"],
@@ -50,13 +50,16 @@ def test_merge(CS):
     check("hooks and comment keys are never merged", merged["hooks"] == {"Stop": []} and "_comment" not in merged, merged)
     check("each change is listed", len(changes) == 2 and any("query.py" in c for c in changes), changes)
     check("the user's dict is not modified in place", user["permissions"]["allow"] == ["Bash(ls *)", "Bash(git status*)"])
-    again, changes2 = CS.merge(merged, EX, "/srv/vault")
+    again, changes2 = CS.merge(merged, EX, "/srv/vault", platform="linux")
     check("merging again changes nothing", again == merged and changes2 == [], changes2)
-    odd, _ = CS.merge({"permissions": "strict"}, EX, "/v")
+    odd, _ = CS.merge({"permissions": "strict"}, EX, "/v", platform="linux")
     check("a permissions value that is not an object is left alone", odd["permissions"] == "strict", odd)
-    fresh, _ = CS.merge({}, EX, "/v")
+    fresh, _ = CS.merge({}, EX, "/v", platform="linux")
     check("an empty settings file gets the whole recommendation",
           fresh["permissions"]["defaultMode"] == "acceptEdits" and len(fresh["permissions"]["allow"]) == 2, fresh)
+    win, _ = CS.merge({}, EX, "C:\\Vault", platform="win32", executable="C:\\Py\\python.exe")
+    check("on win32 a python rule names the command the way Brain runs it there",
+          win["permissions"]["allow"][1] == 'Bash("C:\\Py\\python.exe" -X utf8 "C:\\Vault\\_bin\\query.py" *)', win)
 
 
 def test_example():
@@ -80,7 +83,7 @@ def test_cli():
         with open(settings, "w") as fh:
             json.dump(user, fh)
         env = {k: v for k, v in os.environ.items() if not k.startswith("BRAIN_")}
-        env.update(HOME=home, BRAIN_VAULT=REPO, BRAIN_STATE=os.path.join(root, "state"))
+        env.update(HOME=home, USERPROFILE=home, BRAIN_VAULT=REPO, BRAIN_STATE=os.path.join(root, "state"))
 
         def run(*args):
             p = subprocess.run([sys.executable, CLI] + list(args), env=env, stdin=subprocess.DEVNULL,

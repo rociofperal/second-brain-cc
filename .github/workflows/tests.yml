@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
         python: ["3.9", "3.14"]
     steps:
       - uses: actions/checkout@v4
@@ -26,4 +26,96 @@ jobs:
           git config --global user.name "tests"
           git config --global user.email "tests@example.com"
       - name: Run every test, each in a scratch HOME
-        run: python _bin/run_all_tests.py --verbose
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set -o pipefail
+          mkdir -p ci-logs
+          python _bin/run_all_tests.py --verbose 2>&1 | tee "ci-logs/${{ matrix.os }}-py${{ matrix.python }}.txt"
+      # The installers, run for real with no terminal in a throwaway HOME. Their output goes at the end of
+      # the same log as the tests, so it is published with it. A failing installer fails the job.
+      # Runs even when a test failed: the Windows leg still has known failures and must be smoke-tested too.
+      - name: Smoke test the installers in a throwaway HOME (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set -eo pipefail
+          mkdir -p ci-logs
+          smoke="$(cygpath -m "$RUNNER_TEMP")/brain-smoke"
+          mkdir -p "$smoke/home/.claude" "$smoke/state"
+          echo '{}' > "$smoke/home/.claude/settings.json"
+          export USERPROFILE="$(cygpath -w "$smoke/home")" APPDATA="$(cygpath -w "$smoke/home/AppData/Roaming")" \
+                 LOCALAPPDATA="$(cygpath -w "$smoke/home/AppData/Local")" BRAIN_STATE="$(cygpath -w "$smoke/state")"
+          unset BRAIN_VAULT
+          {
+            echo
+            echo "==== installer smoke test (Windows, throwaway profile $USERPROFILE) ===="
+            echo "---- pwsh -File bootstrap.ps1"
+            pwsh -NoProfile -ExecutionPolicy Bypass -File bootstrap.ps1 </dev/null
+            echo "---- pwsh -File integrations/claude-code/install.ps1"
+            pwsh -NoProfile -ExecutionPolicy Bypass -File integrations/claude-code/install.ps1 </dev/null
+            echo "---- python -X utf8 integrations/cli/brain status"
+            python -X utf8 integrations/cli/brain status </dev/null
+            echo "---- brain.cmd status (the cmd wrapper)"
+            cmd //c "$(cygpath -w "$PWD/integrations/cli/brain.cmd") status" </dev/null >"$smoke/cmd.out" 2>&1
+            head -n 5 "$smoke/cmd.out"
+            echo "---- brain.ps1 status (the PowerShell wrapper)"
+            pwsh -NoProfile -ExecutionPolicy Bypass -File integrations/cli/brain.ps1 status </dev/null >"$smoke/ps.out" 2>&1
+            head -n 5 "$smoke/ps.out"
+            echo "---- hooks written into the throwaway settings.json"
+            python -X utf8 - <<'PY'
+          import json, os, sys
+          s = json.load(open(os.path.join(os.path.expanduser("~"), ".claude", "settings.json"), encoding="utf-8"))
+          cmds = [h["command"] for g in s["hooks"].values() for x in g for h in x["hooks"]]
+          bad = [c for c in cmds if not (c.startswith('"') and ' -X utf8 "' in c)]
+          assert len(cmds) >= 10 and not bad, (len(cmds), bad)
+          print("%d hooks, for example: %s" % (len(cmds), cmds[0]))
+          PY
+            echo "==== installer smoke test passed ===="
+          } 2>&1 | tee -a "ci-logs/${{ matrix.os }}-py${{ matrix.python }}.txt"
+      - name: Smoke test the installers in a throwaway HOME (macOS and Linux)
+        if: always() && runner.os != 'Windows'
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set -eo pipefail
+          mkdir -p ci-logs
+          smoke="$RUNNER_TEMP/brain-smoke"
+          mkdir -p "$smoke/home/.claude" "$smoke/state"
+          echo '{}' > "$smoke/home/.claude/settings.json"
+          export HOME="$smoke/home" BRAIN_STATE="$smoke/state"
+          unset BRAIN_VAULT
+          {
+            echo
+            echo "==== installer smoke test (${{ runner.os }}, throwaway HOME $HOME) ===="
+            echo "---- bash bootstrap.sh"
+            bash bootstrap.sh </dev/null
+            echo "---- bash integrations/claude-code/install.sh"
+            bash integrations/claude-code/install.sh </dev/null
+            echo "---- python bootstrap.py and integrations/claude-code/install.py (the cross-platform twins)"
+            python bootstrap.py </dev/null
+            python integrations/claude-code/install.py </dev/null
+            echo "---- python -X utf8 integrations/cli/brain status"
+            python -X utf8 integrations/cli/brain status </dev/null
+            echo "---- hooks written into the throwaway settings.json"
+            python - <<'PY'
+          import json, os
+          s = json.load(open(os.path.join(os.path.expanduser("~"), ".claude", "settings.json"), encoding="utf-8"))
+          cmds = [h["command"] for g in s["hooks"].values() for x in g for h in x["hooks"]]
+          bad = [c for c in cmds if not c.startswith("/usr/bin/python3 ")]
+          assert len(cmds) >= 10 and not bad, (len(cmds), bad)
+          print("%d hooks, for example: %s" % (len(cmds), cmds[0]))
+          PY
+            echo "==== installer smoke test passed ===="
+          } 2>&1 | tee -a "ci-logs/${{ matrix.os }}-py${{ matrix.python }}.txt"
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-${{ matrix.os }}-py${{ matrix.python }}
+          path: ci-logs/
+          if-no-files-found: ignore

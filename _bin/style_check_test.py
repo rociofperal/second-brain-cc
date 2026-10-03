@@ -174,6 +174,9 @@ def scratch(root):
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": paths["home"], "TMPDIR": root,
            "BRAIN_STATE": paths["state"], "BRAIN_VAULT": paths["vault"], "BRAIN_OFFLINE": "1",
            "PYTHONDONTWRITEBYTECODE": "1"}
+    if sys.platform == "win32":      # Python needs these to start; HOME is USERPROFILE here
+        env["USERPROFILE"] = paths["home"]
+        env.update({k: os.environ[k] for k in ("SYSTEMROOT", "PATHEXT", "COMSPEC") if k in os.environ})
     return env, paths
 
 

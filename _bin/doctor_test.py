@@ -62,7 +62,7 @@ def test_pure():
             path = os.path.join(home, ".claude", "projects", rel)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             open(path, "w").close()
-        names = [os.path.relpath(p, os.path.join(home, ".claude", "projects")) for p in doctor.transcript_files(home)]
+        names = [os.path.relpath(p, os.path.join(home, ".claude", "projects")).replace(os.sep, "/") for p in doctor.transcript_files(home)]
         check("transcripts are read from every project directory, top level only",
               names == ["-home-me-code-app/b.jsonl", "-home-me/a.jsonl", "-srv-repo/c.jsonl"], names)
     finally:

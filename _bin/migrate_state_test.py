@@ -21,6 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import brain_paths
+import oslink
 
 ok, fail = [], []
 TMP = []
@@ -48,7 +49,7 @@ def home():
     TMP.append(root)
     h = os.path.join(root, "home")
     legacy = os.path.join(h, ".claude", "state", "brain")
-    new = brain_paths.state_dir(environ={}, home=h)
+    new = brain_paths.state_dir(environ={"LOCALAPPDATA": os.path.join(h, "AppData", "Local")}, home=h)
     backups = os.path.join(root, "backups")
     return h, legacy, new, backups
 
@@ -71,12 +72,12 @@ def test_plan(M):
     check("a real legacy directory: migrate", M.plan(legacy, new) == "migrate")
     shutil.rmtree(legacy)
     os.makedirs(new)
-    os.symlink(new, legacy)
+    oslink.make_dir_link(new, legacy)
     check("legacy already a symlink to the new directory: done", M.plan(legacy, new) == "done")
-    os.remove(legacy)
+    oslink.remove_link(legacy)
     other = os.path.join(h, "elsewhere")
     os.makedirs(other)
-    os.symlink(other, legacy)
+    oslink.make_dir_link(other, legacy)
     check("legacy a symlink somewhere else: refuse", M.plan(legacy, new) == "foreign-symlink")
 
 
@@ -85,7 +86,7 @@ def test_migrate(M):
     h, legacy, new, backups = home()
     populate(legacy, new)
     dry = M.migrate(legacy, new, backups, dry_run=True)
-    check("a dry run changes nothing", os.path.isdir(legacy) and not os.path.islink(legacy)
+    check("a dry run changes nothing", os.path.isdir(legacy) and not oslink.is_link(legacy)
           and not os.path.exists(backups) and dry["action"] == "migrate", dry)
 
     r = M.migrate(legacy, new, backups)
@@ -102,7 +103,7 @@ def test_migrate(M):
           read(os.path.join(new, "tasks-state.json")) == '{"from": "new"}' and len(kept) == 1
           and read(os.path.join(new, kept[0])) == '{"from": "legacy"}', (kept, r))
     check("~/.claude/state/brain is now a symlink to the new directory",
-          os.path.islink(legacy) and os.path.realpath(legacy) == os.path.realpath(new), os.path.realpath(legacy))
+          oslink.is_link(legacy) and os.path.realpath(legacy) == os.path.realpath(new), os.path.realpath(legacy))
     check("so a script still using the old path reads the moved files",
           read(os.path.join(legacy, "logs", "daemon.log")) == "legacy daemon log\n")
     bk = r.get("backup")
@@ -119,7 +120,7 @@ def test_migrate(M):
 
     rb = M.rollback(legacy, new, bk)
     check("rollback restores the legacy directory from the backup",
-          rb.get("ok") is True and os.path.isdir(legacy) and not os.path.islink(legacy)
+          rb.get("ok") is True and os.path.isdir(legacy) and not oslink.is_link(legacy)
           and read(os.path.join(legacy, "tasks-state.json")) == '{"from": "legacy"}', rb)
     check("and leaves the new directory in place", os.path.isfile(os.path.join(new, "guardian-state.json")))
 
@@ -129,14 +130,14 @@ def test_edges(M):
     h, legacy, new, backups = home()
     r = M.migrate(legacy, new, backups)
     check("on a fresh machine it creates the new directory and the compatibility symlink",
-          r.get("ok") is True and os.path.isdir(new) and os.path.islink(legacy)
+          r.get("ok") is True and os.path.isdir(new) and oslink.is_link(legacy)
           and os.path.realpath(legacy) == os.path.realpath(new), r)
 
     h, legacy, new, backups = home()
     other = os.path.join(h, "elsewhere")
     os.makedirs(other)
     os.makedirs(os.path.dirname(legacy))
-    os.symlink(other, legacy)
+    oslink.make_dir_link(other, legacy)
     r = M.migrate(legacy, new, backups)
     check("a legacy symlink pointing elsewhere is refused and left alone",
           r.get("ok") is False and os.path.realpath(legacy) == os.path.realpath(other) and not os.path.exists(new), r)
@@ -155,20 +156,20 @@ def test_cli():
     print("\n== migrate_state.py command line ==")
     h, legacy, new, _ = home()
     write(os.path.join(legacy, "tasks-state.json"), "{}")
-    env = dict(os.environ, HOME=h)
+    env = dict(os.environ, HOME=h, USERPROFILE=h, LOCALAPPDATA=os.path.join(h, "AppData", "Local"))
     env.pop("BRAIN_STATE", None)
     env.pop("XDG_STATE_HOME", None)
     p = subprocess.run([sys.executable, os.path.join(HERE, "migrate_state.py"), "status"], env=env,
                        capture_output=True, text=True, timeout=60)
     check("status names both locations and the pending migration, changing nothing",
           p.returncode == 0 and legacy in p.stdout and new in p.stdout and "migrate" in p.stdout
-          and not os.path.islink(legacy), (p.returncode, p.stdout, p.stderr))
+          and not oslink.is_link(legacy), (p.returncode, p.stdout, p.stderr))
     probe = [sys.executable, "-c", "import brainlib; print(brainlib.STATE)"]
     before = subprocess.run(probe, cwd=HERE, env=env, capture_output=True, text=True, timeout=60).stdout.strip()
     p = subprocess.run([sys.executable, os.path.join(HERE, "migrate_state.py"), "migrate"], env=env,
                        capture_output=True, text=True, timeout=60)
     after = subprocess.run(probe, cwd=HERE, env=env, capture_output=True, text=True, timeout=60).stdout.strip()
-    check("migrate moves the state and links the old path", p.returncode == 0 and os.path.islink(legacy),
+    check("migrate moves the state and links the old path", p.returncode == 0 and oslink.is_link(legacy),
           (p.returncode, p.stdout, p.stderr))
     check("brainlib used the legacy directory before and the new one after",
           before == legacy and after == new, (before, after))

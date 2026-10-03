@@ -50,8 +50,35 @@ If you clone somewhere other than `~/Brain`, export `BRAIN_VAULT=/path/to/vault`
 run offers to add it to your shell profile); the MCP server and the CLI also detect it.
 
 **Requirements:** Python 3.9 or newer with SQLite/FTS5 (bundled with CPython) and `git`, on
-macOS or Linux. Optional: [KeePassXC](https://keepassxc.org) for credentials and Obsidian as a
-GUI.
+macOS, Linux or [Windows](#windows). Optional: [KeePassXC](https://keepassxc.org) for credentials and
+Obsidian as a GUI.
+
+## Windows
+
+**Requirements:** Python 3.9 or newer from [python.org](https://www.python.org/downloads/) or
+`winget install Python.Python.3.12`, and [Git for Windows](https://gitforwindows.org)
+(`winget install Git.Git`). Claude Code on Windows needs Git for Windows too, and runs the hooks through
+it. Nothing else is required; `winget install KeePassXCTeam.KeePassXC` and
+`winget install Obsidian.Obsidian` add the optional tools.
+
+```powershell
+git clone https://github.com/gotoalberto/second-brain-cc.git $HOME\Brain
+powershell -ExecutionPolicy Bypass -File $HOME\Brain\bootstrap.ps1                       # core: index, health, first run
+powershell -ExecutionPolicy Bypass -File $HOME\Brain\integrations\claude-code\install.ps1   # Claude Code: skills, hooks
+```
+
+The `.ps1` scripts find Python (`py -3`, then `python`), set `BRAIN_VAULT` to the folder they live in and
+run the same `bootstrap.py` / `install.py` the `.sh` scripts mirror. The first run is
+`integrations\first-run\setup.ps1`. To use `brain` from cmd or PowerShell, put the CLI folder on your
+user `PATH` (see [integrations/cli](integrations/cli/README.md)).
+
+- **UTF-8.** The vault is UTF-8 notes, and on Windows Python reads and writes files in the ANSI code
+  page unless it runs in UTF-8 mode. Every command Brain generates starts Python with `-X utf8`, for
+  example the hooks in `~/.claude/settings.json`:
+  `"C:\Python312\python.exe" -X utf8 "C:\Users\you\Brain\_bin\compass.py"`. If you run a script by
+  hand, do the same (`python -X utf8 _bin\doctor.py`) or set `PYTHONUTF8=1`.
+- **Scheduled jobs** (guardian, sync, watch, tasks) are Windows Task Scheduler tasks, installed by the
+  first run when you say yes; state lives in `%LOCALAPPDATA%\brain`.
 
 ## First run
 
@@ -191,8 +218,8 @@ full checklist for a new machine is
 
 ### Supported environments
 
-macOS and Linux, and nothing else. Skills, routines and scheduled tasks are written to work on
-both, and generic content never names a particular machine: a rule reads "on a Linux machine",
+macOS, Linux and Windows (Task Scheduler for scheduled jobs, Python started with `-X utf8`, Git for
+Windows). Skills, routines and scheduled tasks are written to work on all three, and generic content never names a particular machine: a rule reads "on a Linux machine",
 not "on the server in the closet". Every machine registers itself in `_bin/machines.py` (at the
 end of its first run, then once a day from the guardian's scheduled repair), every session
 is told which machine it is on and what that machine has (`_bin/machine_caps.py`, the
@@ -566,9 +593,10 @@ non-zero for a crash, not for findings; no hosted connectors, only mechanisms yo
 python3 _bin/run_all_tests.py            # every *_test.py, each with its own HOME and BRAIN_STATE
 ```
 
-No test reaches the real machine: KeePass, Google, launchctl, systemctl, crontab and agent CLIs are
-fakes, and state lives in temporary directories. CI runs the suite on macOS and Linux with Python
-3.9 and 3.14 ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)).
+No test reaches the real machine: KeePass, Google, launchctl, systemctl, crontab, Task Scheduler and agent
+CLIs are fakes, and state lives in temporary directories. CI runs the suite on macOS, Linux and Windows with
+Python 3.9 and 3.14, then runs the installers (`bootstrap` and `claude-code/install`) and `brain status`
+in a throwaway HOME ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)).
 
 ## Portability
 

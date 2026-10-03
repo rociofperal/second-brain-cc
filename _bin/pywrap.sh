@@ -39,5 +39,19 @@ for c in $CANDIDATES; do
   fi
 done
 
+# Git for Windows (MSYS/MinGW sh): the macOS paths above do not exist there, so take the first
+# interpreter on PATH that runs. Never done on macOS/Linux, where the list above is the contract.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    for c in "${BRAIN_PYTHON:-}" python3 python py; do
+      [ -n "$c" ] || continue
+      tried="$tried $c"
+      if "$c" -c "" >/dev/null 2>&1 </dev/null; then
+        exec "$c" "$@"
+      fi
+    done
+    ;;
+esac
+
 echo "pywrap: no working python3 (tried:$tried); if it is the Xcode license gate: sudo xcodebuild -license accept" >&2
 exit 69

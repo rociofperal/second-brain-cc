@@ -3,6 +3,7 @@
 
   BRAIN_STATE                          when set (a leading ~ is expanded)
   ~/Library/Application Support/brain  on macOS
+  %LOCALAPPDATA%\brain                 on Windows
   $XDG_STATE_HOME/brain                elsewhere, or ~/.local/state/brain
 
 Deliberately not under ~/.claude. State, logs, queues and ledgers belong to Brain, and
@@ -26,11 +27,14 @@ def state_dir(environ=None, home=None, platform=None):
 
     explicit = (environ.get("BRAIN_STATE") or "").strip()
     if explicit:
-        if explicit == "~" or explicit.startswith("~/"):
+        if explicit == "~" or explicit.startswith("~/") or explicit.startswith("~\\"):
             explicit = home + explicit[1:]
         return explicit
     if platform == "darwin":
         return os.path.join(home, "Library", "Application Support", "brain")
+    if platform == "win32":
+        local = (environ.get("LOCALAPPDATA") or "").strip()
+        return os.path.join(local if local else os.path.join(home, "AppData", "Local"), "brain")
     xdg = (environ.get("XDG_STATE_HOME") or "").strip()
     return os.path.join(xdg if xdg else os.path.join(home, ".local", "state"), "brain")
 
@@ -41,7 +45,7 @@ def legacy_state_dir(home=None):
     return os.path.join(home, ".claude", "state", "brain")
 
 
-def effective_state_dir(environ=None, home=None, platform=None, isdir=os.path.isdir, islink=os.path.islink):
+def effective_state_dir(environ=None, home=None, platform=None, isdir=os.path.isdir, islink=None):
     """The state directory scripts should use today, migration taken into account.
 
     While ~/.claude/state/brain is still a real directory, the move has not happened on
@@ -51,6 +55,8 @@ def effective_state_dir(environ=None, home=None, platform=None, isdir=os.path.is
     it, the new directory is used. BRAIN_STATE, when set, wins over both.
     """
     environ = os.environ if environ is None else environ
+    if islink is None:
+        from oslink import is_link as islink      # a Windows junction counts as a link
     if (environ.get("BRAIN_STATE") or "").strip():
         return state_dir(environ, home, platform)
     legacy = legacy_state_dir(home)

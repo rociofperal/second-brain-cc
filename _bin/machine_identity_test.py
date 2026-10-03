@@ -202,8 +202,34 @@ def test_machine_is_mine_override():
           M.machine_is_mine("alias-x", environ=dict(env, BRAIN_MACHINE_ALIASES="alias-x"), run=boom, open_=boom))
 
 
+def test_windows_machine_guid():
+    out = ("\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography\r\n"
+           "    MachineGuid    REG_SZ    3F2504E0-4F89-11D3-9A0C-0305E82C3301\r\n")
+    check("reg query output: the MachineGuid is read", M.parse_reg_machine_guid(out) == "3F2504E0-4F89-11D3-9A0C-0305E82C3301")
+    check("reg query output without the value gives \"\"", M.parse_reg_machine_guid("ERROR: not found") == "")
+    seen = []
+    got = M.read_uuid("win32", lambda cmd: (seen.append(cmd) or (0, out, "")), None)
+    check("on Windows read_uuid asks reg, never opens a file", got.startswith("3F2504E0") and seen and seen[0][0] == "reg")
+    check("on Windows a failing reg gives \"\"", M.read_uuid("win32", lambda cmd: (1, "", "err"), None) == "")
+    check("the key on Windows is hostname + 8 hex", M.machine_key("PC-ROCIO", got) == "PC-ROCIO-3f2504e0")
+
+
+def test_real_hostname_paths():
+    # No BRAIN_MACHINE_KEY and no hostname given: the real hostname is read. A `platform`
+    # parameter once shadowed the platform module here and every real call raised.
+    def no_file(path):
+        raise OSError("none")
+    for plat in ("linux", "darwin", "win32"):
+        try:
+            key = M.current_key(platform=plat, run=lambda cmd: (1, "", ""), open_=no_file, environ={})
+            check("current_key reads the real hostname on %s" % plat, bool(key) and isinstance(key, str), key)
+        except Exception as exc:
+            check("current_key reads the real hostname on %s" % plat, False, repr(exc))
+    check("machine_label reads the real hostname", bool(M.machine_label()))
+
+
 def main():
-    for t in (test_sanitize_hostname, test_machine_key, test_parse_ioreg_uuid, test_parse_machine_id,
+    for t in (test_real_hostname_paths, test_windows_machine_guid, test_sanitize_hostname, test_machine_key, test_parse_ioreg_uuid, test_parse_machine_id,
               test_parse_product_uuid, test_current_key_override, test_read_uuid, test_machine_label, test_id8,
               test_historical_keys, test_machine_is_mine, test_machine_is_mine_override):
         print("\n== %s ==" % t.__name__)

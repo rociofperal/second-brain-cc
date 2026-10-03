@@ -10,7 +10,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -49,7 +48,8 @@ class TtyPrompt:
 
     def interactive(self):
         try:
-            return self.stdin.isatty()
+            import osproc
+            return osproc.isatty(self.stdin)
         except Exception:
             return False
 
@@ -241,26 +241,32 @@ class LocalShared:
 
 
 class McpSetup:
-    def __init__(self, vault, home, environ=None, which=shutil.which, run=subprocess.run, platform=None, clock=None):
+    def __init__(self, vault, home, environ=None, which=shutil.which, run=subprocess.run, platform=None, clock=None,
+                 executable=None):
         self._vault, self.home = vault, home
         self.environ = os.environ if environ is None else environ
         self.which, self.run = which, run
         self.platform = platform or sys.platform
+        if not executable and self.platform == "win32":
+            import pycmd                 # the one python.exe Windows configs name: BRAIN_PYTHON, never pythonw.exe
+
+            executable = pycmd.windows_python(environ=self.environ)
+        self.executable = executable or sys.executable
         self.clock = clock or (lambda: dt.datetime.now())
 
     def vault(self):
         return self._vault
 
     def snippets(self):
-        return D.mcp_snippets(self._vault, "python3")
+        return D.mcp_snippets(self._vault, "python3", platform=self.platform, executable=self.executable)
 
     def claude_available(self):
         return bool(self.which("claude"))
 
     def register_claude(self):
-        server = os.path.join(self._vault, "integrations", "mcp", "server.py")
+        command, args, _ = D.mcp_command(self._vault, "python3", self.platform, self.executable)
         try:
-            p = self.run([self.which("claude") or "claude", "mcp", "add", "brain", "--", "python3", server],
+            p = self.run([self.which("claude") or "claude", "mcp", "add", "brain", "--", command] + args,
                          capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return False, "%s: %s" % (type(exc).__name__, exc)
@@ -295,9 +301,15 @@ class McpSetup:
 # ---------------------------------------------------------------- scheduled jobs
 
 
+def _succeed(cmd, **kw):
+    """subprocess.run for BRAIN_FAKE_SCHEDULER: every scheduler call succeeds and nothing is started."""
+    return subprocess.CompletedProcess(cmd, 0, "", "")
+
+
 class SchedulerSetup:
     """The guardian's own scheduler adapters, narrowed to the accepted jobs. BRAIN_FAKE_SCHEDULER=1 swaps
-    launchctl, systemctl and crontab for `true`: files are written under HOME, no scheduler is told."""
+    launchctl, systemctl and crontab for `true`, and schtasks.exe for a stand-in that succeeds: files are
+    written under HOME and the state directory, no scheduler is told."""
 
     def __init__(self, vault, home, state_dir, platform=None, environ=None, which=shutil.which):
         self.vault, self.home, self.state_dir = vault, home, state_dir
@@ -312,13 +324,20 @@ class SchedulerSetup:
         from guardian_core import adapters as GA
 
         fake = self.environ.get("BRAIN_FAKE_SCHEDULER") == "1"
+        # Faked, the scheduler program is named `true` and never started (Windows has no `true` to start).
+        run = _succeed if fake else subprocess.run
         if kind == "launchd":
             return GA.LaunchctlControl(vault=self.vault, home=self.home, launchctl="true" if fake else "/bin/launchctl",
-                                       backup_dir=os.path.join(self.state_dir, "plist-backups"), allowed=labels)
+                                       backup_dir=os.path.join(self.state_dir, "plist-backups"), allowed=labels, run=run)
         if kind == "systemd":
             return GA.SystemdUserControl(vault=self.vault, home=self.home, systemctl="true" if fake else "systemctl",
-                                         backup_dir=os.path.join(self.state_dir, "unit-backups"), allowed=labels)
-        return GA.CronControl(vault=self.vault, home=self.home, crontab="true" if fake else "crontab", allowed=labels)
+                                         backup_dir=os.path.join(self.state_dir, "unit-backups"), allowed=labels, run=run)
+        if kind == "schtasks":
+            return GA.SchtasksControl(vault=self.vault, home=self.home, tasks_dir=os.path.join(self.state_dir, "schtasks"),
+                                      backup_dir=os.path.join(self.state_dir, "schtasks-backups"), run=run,
+                                      environ=self.environ, allowed=labels)
+        return GA.CronControl(vault=self.vault, home=self.home, crontab="true" if fake else "crontab", allowed=labels,
+                              run=run)
 
     def preview(self, kind, jobs):
         labels = [D.job_label(kind, j) for j in jobs]
@@ -334,6 +353,8 @@ class SchedulerSetup:
                 out.append("== %s\n%s" % (os.path.join(self.home, "Library", "LaunchAgents", label + ".plist"), rendered))
             elif kind == "systemd":
                 out += ["== %s\n%s" % (unit, text) for unit, text in rendered.items()]
+            elif kind == "schtasks":
+                out.append("== Task Scheduler task %s (schtasks /Create /XML)\n%s" % (label, rendered))
             else:
                 out.append("== crontab line\n%s" % rendered)
         return "\n".join(out)
@@ -369,7 +390,9 @@ class RemoteControlSetup:
         self._vault, self.home, self.state_dir = vault, home, state_dir
         self.environ = os.environ if environ is None else environ
         self.which, self.run = which, run
-        self.euid = os.geteuid() if euid is None and hasattr(os, "geteuid") else euid
+        if euid is None and hasattr(os, "geteuid"):
+            euid = os.geteuid()
+        self.euid = euid                          # None on Windows, which has no root uid
         self.hostname = hostname                  # None: the machine's own, through machine_identity
         self.user = user
         self.platform = platform or sys.platform
@@ -488,9 +511,11 @@ class RemoteControlSetup:
         if not claude:
             return False, "no claude CLI"
         previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        # POSIX: the child gets Ctrl+C back. Windows has no preexec_fn (Popen refuses it); there the console
+        # delivers Ctrl+C to the child anyway, and ignoring it here is what keeps the first run alive.
+        extra = {} if self.platform == "win32" else {"preexec_fn": lambda: signal.signal(signal.SIGINT, signal.SIG_DFL)}
         try:
-            p = self.run(RC.command(label, claude), cwd=path, env=RC.server_env(dict(self.environ)),
-                         preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+            p = self.run(RC.command(label, claude), cwd=path, env=RC.server_env(dict(self.environ)), **extra)
         except OSError as exc:
             return False, "%s: %s" % (type(exc).__name__, exc)
         finally:
@@ -509,6 +534,8 @@ class RemoteControlSetup:
         import getpass
 
         user = self.user or getpass.getuser()
+        if self.environ.get("BRAIN_FAKE_SCHEDULER") == "1":
+            return True, "lingering left as it is for %s (BRAIN_FAKE_SCHEDULER)" % user
         rc, out = self._call([self.loginctl, "show-user", user, "--property=Linger"])
         if rc == 0 and "Linger=yes" in out:
             return True, "lingering was already on for %s" % user
@@ -533,7 +560,9 @@ class RoutinePool:
         if not template:
             return False, "no command in 90-Meta/agent-command.txt"
         try:
-            exe = os.path.expanduser(shlex.split(template)[0])
+            import osproc
+
+            exe = os.path.expanduser(osproc.split_command(template)[0])
         except (ValueError, IndexError):
             return False, "the agent command does not parse"
         if os.path.isfile(exe) and os.access(exe, os.X_OK):

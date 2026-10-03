@@ -88,13 +88,16 @@ class FileSettingsStore:
 class CanonicalHooksFile:
     """The vault's integrations/claude-code/plugin/brain/hooks/hooks.json, localized for this machine."""
 
-    def __init__(self, path, vault, home=HOME):
+    def __init__(self, path, vault, home=HOME, platform=None, executable=None):
         self.path, self.vault, self.home = path, vault, home
+        # Windows hooks name this interpreter, in UTF-8 mode (domain.localize_hooks). Injectable for tests.
+        self.platform, self.executable = platform, executable
 
     def load(self) -> dict:
         with open(self.path, encoding="utf-8") as fh:
             hooks = json.load(fh).get("hooks") or {}
-        return D.localize_hooks(hooks, vault=self.vault, home=self.home)
+        return D.localize_hooks(hooks, vault=self.vault, home=self.home,
+                                platform=self.platform, executable=self.executable)
 
 
 class ClaudeCodeAgent:

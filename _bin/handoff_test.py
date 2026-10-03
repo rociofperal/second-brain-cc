@@ -22,6 +22,11 @@ ok, fail = [], []
 TMP = []
 
 
+def mode600(path):
+    """Mode 600 on POSIX; Windows has no mode bits, so there it is trivially true."""
+    return sys.platform == "win32" or stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
 def check(name, cond, detail=""):
     (ok if cond else fail).append(name)
     print("  %s %s%s" % ("✓" if cond else "✗", name, ("\n      → " + str(detail)) if detail else ""))
@@ -39,6 +44,9 @@ def machine(root, name, shared=None):
     os.makedirs(state)
     env = {k: v for k, v in os.environ.items() if not k.startswith("BRAIN_")}
     env.update(HOME=home, BRAIN_STATE=state, BRAIN_VAULT=os.path.dirname(HERE), PYTHONDONTWRITEBYTECODE="1")
+    if sys.platform == "win32":          # "~" comes from these on Windows, not HOME
+        env.update(USERPROFILE=home, LOCALAPPDATA=os.path.join(home, "AppData", "Local"),
+                   APPDATA=os.path.join(home, "AppData", "Roaming"))
     if shared:
         env["BRAIN_SHARED_DIR"] = shared
     return {"home": home, "state": state, "env": env}
@@ -85,7 +93,7 @@ def test_shared(root):
           in out.lower())
     files = os.listdir(os.path.join(shared, "handoff"))
     check("one handoff file sits in <shared>/handoff, mode 600", len(files) == 1
-          and stat.S_IMODE(os.stat(os.path.join(shared, "handoff", files[0])).st_mode) == 0o600, files)
+          and mode600(os.path.join(shared, "handoff", files[0])), files)
     check("the keyfile bytes are not readable in it", open(key, "rb").read()[:16]
           not in open(os.path.join(shared, "handoff", files[0]), "rb").read())
 
@@ -94,7 +102,7 @@ def test_shared(root):
     placed = os.path.join(b["home"], ".config", "brain", "brain.key")
     check("redeem succeeds from an unrelated working directory", rc == 0, (rc, out, err))
     check("the keyfile arrives byte for byte, mode 600", os.path.exists(placed)
-          and open(placed, "rb").read() == open(key, "rb").read() and stat.S_IMODE(os.stat(placed).st_mode) == 0o600)
+          and open(placed, "rb").read() == open(key, "rb").read() and mode600(placed))
     cfg = json.load(open(os.path.join(b["state"], "kp-config.json")))
     check("kp.py init recorded the shared database and the keyfile", cfg.get("db") == db and cfg.get("keyfile") == placed,
           cfg)
@@ -138,7 +146,7 @@ def test_inline_with_db(root):
     check("redeem places the database and the keyfile under the new home",
           rc == 0 and open(os.path.join(b["home"], "Documents", "brain.kdbx"), "rb").read() == open(db, "rb").read()
           and open(os.path.join(b["home"], "keys", "k.key"), "rb").read() == b"KEYFILE", (rc, out, err))
-    check("both mode 600", all(stat.S_IMODE(os.stat(p).st_mode) == 0o600
+    check("both mode 600", all(mode600(p)
                                for p in (os.path.join(b["home"], "Documents", "brain.kdbx"),
                                          os.path.join(b["home"], "keys", "k.key"))))
     cfg = json.load(open(os.path.join(b["state"], "kp-config.json")))

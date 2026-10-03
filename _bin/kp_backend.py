@@ -355,6 +355,8 @@ def build(kind, path, args, db_path, master, pwfile_dir):
             _shred(pwfile)
             raise
         argv = [path] + rest + ["--db", db_path, "--pwfile", pwfile]
+        if sys.platform == "win32" and path.lower().endswith(".pl"):
+            argv = ["perl"] + argv          # Windows runs no script by its #! line
         env = dict(os.environ)
         env["BRAIN_KP_KEYFILE"] = keyfile
         return argv, "", (lambda: _shred(pwfile)), env

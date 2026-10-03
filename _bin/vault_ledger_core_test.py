@@ -70,7 +70,7 @@ def test_core(L):
 
 
 def env_for(vault, home):
-    env = dict(os.environ, HOME=home, BRAIN_VAULT=vault)
+    env = dict(os.environ, HOME=home, USERPROFILE=home, BRAIN_VAULT=vault)
     env.pop("BRAIN_OFF", None)
     env.pop("BRAIN_STATE", None)
     return env
@@ -125,7 +125,7 @@ def test_hook_unchanged():
     write(os.path.join(vault, "10-Projects", "raw.md"))
     p = hook()
     got = rows(vault)
-    credited = sorted(os.path.relpath(r[1], vault) for r in got)
+    credited = sorted(os.path.relpath(r[1], vault).replace(os.sep, "/") for r in got)
     check("notes written since are credited to the hook's session",
           p.returncode == 0 and credited == ["10-Projects/raw.md", "30-Knowledge/note.md"]
           and all(r[0] != "system" for r in got), (p.stderr, got))

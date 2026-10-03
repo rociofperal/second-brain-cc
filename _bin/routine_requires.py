@@ -84,9 +84,9 @@ def requirements(text):
 
 def resolve(target, vault, home):
     """An absolute path: `~` is `home`, a relative path is under `vault`."""
-    if target == "~" or target.startswith("~/"):
+    if target == "~" or target.startswith("~/") or target.startswith("~\\"):
         return home + target[1:]
-    if os.path.isabs(target):
+    if os.path.isabs(target) or target.startswith("/"):     # a "/..." path is absolute on Windows too
         return target
     return os.path.normpath(os.path.join(vault, target))
 
@@ -101,7 +101,7 @@ def check(items, probe, vault, home):
     for kind, target, hint in items:
         path = resolve(target, vault, home)
         if kind == "program":
-            if "/" in target:
+            if "/" in target or "\\" in target:
                 good = probe.is_exec(path)
             else:
                 good = probe.which(target) is not None

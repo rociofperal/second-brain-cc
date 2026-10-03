@@ -50,6 +50,15 @@ def main():
         t = time.time() - age
         os.utime(path, (t, t))
 
+    print("== kp.pid_alive: when in doubt, assume alive ==")
+    for odd in ("?", "", None, 0, "0", -1, "-7", "abc"):
+        check("pid %r is assumed alive" % (odd,), K.pid_alive(odd) is True)
+    check("a real live pid is alive", K.pid_alive(os.getpid()) is True)
+    check("a dead pid is dead", K.pid_alive(dead_pid) is False)
+    lock(["?", "u", K._host(), K.BRAIN_LOCK_TAG + me])
+    check("our key with a garbled pid line is not cleared as own-dead", K.lock_state()["status"] != "own-dead",
+          K.lock_state())
+
     print("== a lock kp.py wrote ==")
     check("the machine key comes from machine_identity", me == "workstation-0f0f0f0f", me)
     lock([dead_pid, "u", K._host(), K.BRAIN_LOCK_TAG + me])

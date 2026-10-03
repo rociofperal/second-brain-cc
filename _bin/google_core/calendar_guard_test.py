@@ -155,9 +155,41 @@ def test_helpers():
     check("no alternative is in the past", alts and all(a["start"] >= "2030-01-07T12:00" for a in alts), alts)
 
 
+def test_no_database():
+    """Simulated everywhere: with no time zone database a non-UTC zone fails closed, UTC still works."""
+    real = cg._ZoneInfo
+
+    def none(key):
+        raise KeyError(key)
+    cg._ZoneInfo = none
+    try:
+        check("UTC works without a database", cg.ZoneInfo("UTC") is dt.timezone.utc)
+        try:
+            cg.ZoneInfo("Europe/Paris")
+            check("a non-UTC zone without a database raises", False)
+        except cg.GuardError as exc:
+            check("a non-UTC zone without a database raises GuardError", True)
+            check("and tells the user to pip install tzdata", "pip install tzdata" in str(exc), str(exc))
+        try:
+            cg.parse_ts("2030-01-07T10:00:00", "Europe/Paris")
+            check("parse_ts in a non-UTC zone fails closed too", False)
+        except cg.GuardError:
+            check("parse_ts in a non-UTC zone fails closed too", True)
+    finally:
+        cg._ZoneInfo = real
+
+
 def main():
-    for t in (test_target, test_create, test_attendees, test_move, test_helpers):
+    for t in (test_no_database, test_target, test_create, test_attendees, test_move, test_helpers):
         print("\n== %s ==" % t.__name__)
+        if t not in (test_target, test_no_database) and not cg.have_zone_database():
+            # Windows has no system time zone database and the project is stdlib-only (no tzdata)
+            print("  skipped: no time zone database on this machine (Europe/Paris, Asia/Tokyo, America/Chicago "
+                  "need it; pip install tzdata to run these)")
+            if t is test_helpers:
+                check("hours parse", cg.parse_hours("15-20") == (15, 20))
+                check("and falls back to UTC", cg.local_zone({"TZ": "Not/AZone"}, readlink=lambda p: "") == "UTC")
+            continue
         try:
             t()
         except Exception as exc:

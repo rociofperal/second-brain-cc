@@ -13,6 +13,23 @@ ln -s ~/Brain/integrations/cli/brain ~/.local/bin/brain     # or /usr/local/bin/
 The vault is the repository the script lives in; export `BRAIN_VAULT=/path/to/vault` to point
 it elsewhere.
 
+### Windows
+
+`brain.cmd` (cmd) and `brain.ps1` (PowerShell) sit next to `brain`. They find Python 3.9+ (`py -3`, then
+`python`) and run `brain` in UTF-8 mode (`python -X utf8 brain ...`), because on Windows Python reads and
+writes files in the ANSI code page otherwise and the vault is UTF-8. Put this folder on your user `PATH`
+once, then open a new terminal:
+
+```powershell
+$cli = "$HOME\Brain\integrations\cli"
+$path = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (($path -split ';') -notcontains $cli) {
+    [Environment]::SetEnvironmentVariable('Path', ($path.TrimEnd(';') + ';' + $cli), 'User')
+}
+```
+
+After that `brain recall x` works from cmd and PowerShell. Git Bash can run the `brain` script itself.
+
 ## Commands
 
 ```bash

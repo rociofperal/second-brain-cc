@@ -18,7 +18,7 @@ def _atomic_write(path, text, mode=None):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = "%s.%d.tmp" % (path, os.getpid())
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
+        with open(tmp, "w", encoding="utf-8", newline="") as fh:    # LF as given, also on Windows
             fh.write(text)
         if mode is not None:
             os.chmod(tmp, mode)
@@ -107,7 +107,7 @@ class VaultFiles:
 
     def read(self, rel):
         try:
-            with open(os.path.join(self.vault, rel), encoding="utf-8") as fh:
+            with open(os.path.join(self.vault, rel), encoding="utf-8", newline="") as fh:
                 return fh.read()
         except OSError:
             return None
@@ -279,7 +279,10 @@ class GitUnsyncedProbe:
     time. None when everything is pushed, or when this is not a git repository.
     """
 
-    def __init__(self, vault, git="/usr/bin/git", now=time.time, timeout=10):
+    def __init__(self, vault, git=None, now=time.time, timeout=10):
+        if git is None:
+            import shutil
+            git = "/usr/bin/git" if os.path.exists("/usr/bin/git") else (shutil.which("git") or "/usr/bin/git")
         self.vault, self.git, self.now, self.timeout = vault, git, now, timeout
 
     def _call(self, *args):

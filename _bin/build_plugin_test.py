@@ -60,7 +60,7 @@ def setup(with_registry=True):
         {"type": "command", "command": "/usr/local/bin/someone-elses-hook"}]}]}}))
     if with_registry:
         write(os.path.join(vault, "90-Meta", "events.json"), json.dumps(REGISTRY))
-    env = dict(os.environ, HOME=home, BRAIN_VAULT=vault, BRAIN_STATE=state)
+    env = dict(os.environ, HOME=home, USERPROFILE=home, BRAIN_VAULT=vault, BRAIN_STATE=state)
     return vault, plugin, claude, state, env
 
 

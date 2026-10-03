@@ -33,7 +33,36 @@ from __future__ import annotations
 import datetime as dt
 import re
 import urllib.parse
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo as _ZoneInfo
+
+def ZoneInfo(key):   # noqa: N802 - drop-in for zoneinfo.ZoneInfo, see below
+    """zoneinfo.ZoneInfo, except that "UTC" always works, even where the machine has no time zone
+    database at all (Windows ships none and the stdlib-only project does not depend on `tzdata`).
+
+    Any other zone on such a machine raises GuardError: slots computed in the wrong zone would be
+    a check that could not look, not one that found the slot free. Where the database exists an
+    unknown key still raises zoneinfo's own error, exactly as before."""
+    try:
+        return _ZoneInfo(key)
+    except Exception:
+        if key == "UTC":
+            return dt.timezone.utc
+        try:
+            _ZoneInfo("UTC")
+        except Exception:
+            raise GuardError("no time zone database on this machine, so the zone %r cannot be used "
+                             "(run: pip install tzdata)" % key) from None
+        raise
+
+
+def have_zone_database():
+    """True when named IANA zones (not only UTC) can be loaded on this machine."""
+    try:
+        _ZoneInfo("Europe/Paris")
+        return True
+    except Exception:
+        return False
+
 
 EXIT_CONFLICT = 3
 WORK_START, WORK_END = 9, 19
@@ -272,7 +301,7 @@ def local_zone(environ=None, readlink=None):
         except OSError:
             name = ""
     try:
-        ZoneInfo(name)
+        _ZoneInfo(name)          # the real thing: our ZoneInfo() would accept any name without a database
         return name
     except Exception:
         return "UTC"

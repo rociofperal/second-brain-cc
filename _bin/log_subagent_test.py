@@ -31,6 +31,9 @@ def scratch(root):
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": paths["home"], "TMPDIR": root,
            "BRAIN_STATE": paths["state"], "BRAIN_VAULT": paths["vault"], "BRAIN_OFFLINE": "1",
            "PYTHONDONTWRITEBYTECODE": "1", "GIT_CEILING_DIRECTORIES": root}
+    if sys.platform == "win32":      # Python and git need these to start at all; HOME is USERPROFILE here
+        env["USERPROFILE"] = paths["home"]
+        env.update({k: os.environ[k] for k in ("SYSTEMROOT", "PATHEXT", "COMSPEC") if k in os.environ})
     return env, paths
 
 
@@ -48,7 +51,7 @@ def test_log_subagent(root):
                                          "agent_type": "verifier", "cwd": "/nonexistent"}),
                        env=env, capture_output=True, text=True, timeout=60)
     traces = glob.glob(os.path.join(paths["vault"], "50-Sessions", "*", "*.md"))
-    body = open(traces[0]).read() if traces else ""
+    body = open(traces[0], encoding="utf-8").read() if traces else ""
     check("a real session gets its trace line",
           p.returncode == 0 and [os.path.basename(t) for t in traces] == ["3ac18522.md"]
           and "subagent `verifier` finished" in body, (p.returncode, traces, p.stderr[-400:]))

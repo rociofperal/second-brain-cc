@@ -52,7 +52,7 @@ def setup():
         json.dump(REGISTRY, fh)
     with open(os.path.join(vault, "90-Meta", "PROTOCOL-COMPACT.md"), "w") as fh:
         fh.write(PROTOCOL)
-    env = dict(os.environ, HOME=home, BRAIN_VAULT=vault)
+    env = dict(os.environ, HOME=home, USERPROFILE=home, BRAIN_VAULT=vault)
     env.pop("BRAIN_STATE", None)
     return vault, home, env
 

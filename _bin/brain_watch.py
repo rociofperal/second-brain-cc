@@ -36,6 +36,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import brain_paths  # noqa: E402
+import pycmd  # noqa: E402
 from events_core import adapters as EAD  # noqa: E402
 from events_core import application as EA  # noqa: E402
 from events_core import domain as ED  # noqa: E402
@@ -99,6 +100,9 @@ def load_registry(path=None):
 
 
 def real_claude_main_log() -> str:
+    if sys.platform == "win32":     # Claude Desktop logs under %APPDATA%\\Claude\\logs on Windows
+        appdata = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
+        return os.path.join(appdata, "Claude", "logs", "main.log")
     return os.path.join(os.path.expanduser("~"), "Library", "Logs", "Claude", "main.log")
 
 
@@ -140,7 +144,7 @@ def build_ports():
         git=EAD.GitUnsyncedProbe(vault),
         files=EAD.VaultFiles(vault),
         clock=EAD.SystemClock(),
-        python=[os.path.join(bin_dir, "pywrap.sh")],
+        python=pycmd.interpreter(os.path.join(bin_dir, "pywrap.sh")),
         bin_dir=bin_dir,
         settings_hooks=EAD.ClaudeSettingsHooks(os.path.join(os.path.expanduser("~"), ".claude")),
         main_log=EAD.MainLogReader(claude_main_log(), os.path.join(brain_paths.state_dir(), "main-log-cursor.json")),

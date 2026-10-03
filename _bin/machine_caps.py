@@ -53,10 +53,12 @@ CATALOGUE_NOTE = "2026-09-12-reference-tool-and-service-catalogue"
 RC_RESTART = {
     "launchd": "launchctl kickstart -k gui/$(id -u)/com.secondbrain.remote-control",
     "systemd": "systemctl --user restart second-brain-remote-control",
+    "schtasks": "schtasks /End /TN second-brain-remote-control && schtasks /Run /TN second-brain-remote-control",
 }
 # What decides whether a SESSION has the browser. The block describes the machine; only the tool
 # list of the session itself answers for the session (detail: the where-claude-in-chrome note).
 CHROME_DEVICES = "chrome-devices.json"
+WIN_HOSTS_KEY = "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts"
 KEEPALIVE = os.path.join(".local", "bin", "chrome-keepalive.sh")
 LOCAL_STATE = os.path.join(".config", "google-chrome", "Local State")
 SCRIPT = "python3 ~/Brain/_bin/machine_caps.py"
@@ -96,7 +98,7 @@ def _browser_line(chrome, scheduler):
         "**usable**" if usable else "**not usable now**", ", ".join(parts), SESSION_RULE)
 
 
-def _own_chrome_line(chrome, mac):
+def _own_chrome_line(chrome, mac, windows=False):
     """Which connected Chrome is this machine's, and how to bring it back. Pure; None without Chrome.
 
     Kept short: it is read at every session start. How to bring Chrome back is only added when
@@ -112,8 +114,11 @@ def _own_chrome_line(chrome, mac):
                 "then `machine_caps.py learn-chrome <deviceId> '<what>'`; until then ask before driving "
                 "another machine's Chrome.")
     if chrome.get("running") is False:
-        line += (" Start it: `open -a \"Google Chrome\"`." if mac else
-                 " `pkill -x chrome` and the keepalive relaunches it; else check the desktop unit.")
+        if windows:
+            line += " Start it: `start chrome`."
+        else:
+            line += (" Start it: `open -a \"Google Chrome\"`." if mac else
+                     " `pkill -x chrome` and the keepalive relaunches it; else check the desktop unit.")
     if chrome.get("picker_blocks"):
         line += (" **Chrome would stop at the profile picker** (several profiles, keepalive without "
                  "`--profile-directory=Default`): the extension cannot load.")
@@ -160,7 +165,7 @@ def render(caps):
 
     chrome = caps.get("chrome") or {}
     lines.append(_line("Browser", lambda: _browser_line(chrome, caps.get("scheduler"))))
-    own = _line("Own Chrome", lambda: _own_chrome_line(chrome, caps.get("os") == "macOS"))
+    own = _line("Own Chrome", lambda: _own_chrome_line(chrome, caps.get("os") == "macOS", caps.get("os") == "Windows"))
     if own:
         lines.append(own)
 
@@ -197,7 +202,8 @@ def _default_tasks_here():
 def _run(cmd, timeout=1.5):
     """(returncode, stdout) of a short local command; (127, "") when it cannot run."""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        extra = {"creationflags": 0x08000000} if sys.platform == "win32" else {}     # CREATE_NO_WINDOW
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **extra)
         return p.returncode, (p.stdout or "").strip()
     except (OSError, subprocess.SubprocessError):
         return 127, ""
@@ -216,6 +222,40 @@ def chrome_running(commands, mac):
             if words and os.path.basename(words[0]) in _LINUX_CHROME_PROCS:
                 return True
     return False
+
+
+def chrome_running_windows(tasklist_output):
+    """Is chrome.exe in `tasklist /FI "IMAGENAME eq chrome.exe" /NH` output? tasklist prints an
+    "INFO: No tasks are running..." line when there is none. Pure."""
+    for line in (tasklist_output or "").splitlines():
+        words = line.split()
+        if words and words[0].lower() == "chrome.exe":
+            return True
+    return False
+
+
+def native_hosts_windows(reg_output):
+    """The host names registered under HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts, from the
+    subkey lines `reg query` prints (`HKEY_CURRENT_USER\\...\\NativeMessagingHosts\\<name>`). Pure."""
+    names = []
+    for line in (reg_output or "").splitlines():
+        line = line.strip()
+        marker = "nativemessaginghosts\\"
+        at = line.lower().find(marker)
+        if at >= 0:
+            name = line[at + len(marker):].strip()
+            if name and "\\" not in name:
+                names.append(name)
+    return names
+
+
+def chrome_exe_paths_windows(environ, home):
+    """Where chrome.exe lives on Windows: Program Files, Program Files (x86), the per-user install."""
+    import ntpath
+    local = environ.get("LOCALAPPDATA") or ntpath.join(home, "AppData", "Local")
+    roots = [environ.get("ProgramFiles") or "C:\\Program Files",
+             environ.get("ProgramFiles(x86)") or "C:\\Program Files (x86)", local]
+    return [ntpath.join(r, "Google", "Chrome", "Application", "chrome.exe") for r in roots]
 
 
 def remote_control_flag(commands):
@@ -304,13 +344,13 @@ def learn_chrome(device_id, what, path=None, read=None):
 
 
 def probe(which=None, exists=None, platform=None, home=None, environ=None, key=None, here=None, tasks_here=None,
-          run=None, read=None):
+          run=None, read=None, isfile=None):
     """What this machine has right now, as a plain dict for render(). Never raises.
 
     Every effect is a parameter: `which(name)` like shutil.which, `exists(path)`, `run(cmd)`
     returning (returncode, stdout), and three callables for the machine key, this machine's
     registry record and the ids of the enabled agent tasks pinned here; `read(path)` returns a
-    file's text or None. A probe that fails degrades to "unknown", never to an exception.
+    file's text or None; `isfile(path)` (default: `exists`) is what finds chrome.exe on Windows. A probe that fails degrades to "unknown", never to an exception.
     """
     which = which or shutil.which
     exists = exists or os.path.exists
@@ -326,14 +366,38 @@ def probe(which=None, exists=None, platform=None, home=None, environ=None, key=N
         scheduler = "launchd" if which("launchctl") else ""
         chrome_installed = exists(_MAC_CHROME)
         hosts = [os.path.join(home, "Library", "Application Support", "Google", "Chrome", "NativeMessagingHosts")]
+    elif platform == "win32":
+        # Task Scheduler. Chrome is chrome.exe in one of three folders; its pairing is the native messaging
+        # host's key under HKCU, read with `reg query` below.
+        scheduler = "schtasks" if which("schtasks") else ""
+        chrome_installed = any((isfile or exists)(p) for p in chrome_exe_paths_windows(environ, home))
+        hosts = []
     else:
         scheduler = "systemd" if which("systemctl") else ("cron" if which("crontab") else "")
         chrome_installed = any(which(n) for n in _LINUX_CHROME)
         hosts = [os.path.join(home, ".config", "google-chrome", "NativeMessagingHosts"),
                  os.path.join(home, ".config", "chromium", "NativeMessagingHosts")]
-    paired = chrome_installed and any(exists(os.path.join(h, NATIVE_HOST)) for h in hosts)
+    if platform == "win32":
+        host = NATIVE_HOST[:-len(".json")]
+        paired = bool(chrome_installed) and any(
+            n.lower() == host for n in _safe(lambda: native_hosts_windows(run(["reg", "query", WIN_HOSTS_KEY])[1]), []))
+    else:
+        paired = chrome_installed and any(exists(os.path.join(h, NATIVE_HOST)) for h in hosts)
     chrome = {"installed": bool(chrome_installed), "paired": bool(paired)}
-    if chrome_installed:
+    if chrome_installed and platform == "win32":
+        import ntpath
+        code, out = _safe(lambda: run(["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/NH"]), (127, ""))
+        chrome["running"] = chrome_running_windows(out) if code == 0 else None
+        chrome["remote_control"] = None          # no `ps -eo command` to read the server's flags from
+        chrome["own"] = _safe(lambda: parse_devices(read(devices_path(environ, home, platform))), [])
+        local = environ.get("LOCALAPPDATA") or ntpath.join(home, "AppData", "Local")
+        state = read(ntpath.join(local, "Google", "Chrome", "User Data", "Local State"))
+        # Only an explicit "ask who's using Chrome" counts here: there is no keepalive to pin a profile.
+        chrome["picker_blocks"] = _safe(lambda: picker_blocks(state, None) and
+                                        json.loads(state)["profile"].get("show_picker_on_startup") is True, False)
+        chrome["login"] = ("present" if exists(ntpath.join(home, ".claude", ".credentials.json"))
+                           else "absent")
+    elif chrome_installed:
         code, out = _safe(lambda: run(["ps", "-eo", "command"]), (127, ""))
         commands = out.splitlines() if code == 0 else None
         chrome["running"] = chrome_running(commands, mac)
@@ -353,8 +417,9 @@ def probe(which=None, exists=None, platform=None, home=None, environ=None, key=N
                                else "absent")
     return {
         "key": _safe(key or _default_key, "?") or "?",
-        "os": "macOS" if mac else ("Linux" if platform.startswith("linux") else platform),
-        "user": environ.get("USER") or environ.get("LOGNAME") or "?",
+        "os": "macOS" if mac else ("Linux" if platform.startswith("linux") else
+                                   ("Windows" if platform == "win32" else platform)),
+        "user": environ.get("USER") or environ.get("LOGNAME") or environ.get("USERNAME") or "?",
         "registered": bool(record),
         "claude_account": (record or {}).get("claude_account", "") if isinstance(record, dict) else "",
         "scheduler": scheduler,

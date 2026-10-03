@@ -204,14 +204,15 @@ MAC_PS = "\n".join(["COMMAND", "/Applications/Google Chrome.app/Contents/MacOS/G
 
 def test_probe_linux():
     home = "/home/someone"
-    paired = home + "/.config/google-chrome/NativeMessagingHosts/com.anthropic.claude_code_browser_extension.json"
+    J = os.path.join            # the probe builds its paths with os.path.join (backslashes on Windows)
+    paired = J(home, ".config", "google-chrome", "NativeMessagingHosts", "com.anthropic.claude_code_browser_extension.json")
     which = {"git": "/usr/bin/git", "python3": "/usr/bin/python3", "systemctl": "/usr/bin/systemctl",
              "google-chrome-stable": "/usr/bin/google-chrome-stable"}
-    creds = home + "/.claude/.credentials.json"
+    creds = J(home, ".claude", ".credentials.json")
     run = runner(LINUX_PS, units={"vnc-desktop": "active"})
-    files = {"/state/" + M.CHROME_DEVICES: '{"devices": [["dev-9", "its profile"]]}',
-             home + "/.config/google-chrome/Local State": json.dumps({"profile": {"info_cache": {"a": {}, "b": {}}}}),
-             home + "/.local/bin/chrome-keepalive.sh": "google-chrome\n"}
+    files = {J("/state", M.CHROME_DEVICES): '{"devices": [["dev-9", "its profile"]]}',
+             J(home, ".config", "google-chrome", "Local State"): json.dumps({"profile": {"info_cache": {"a": {}, "b": {}}}}),
+             J(home, ".local", "bin", "chrome-keepalive.sh"): "google-chrome\n"}
     caps = M.probe(which=which.get, exists=fs({paired, creds}), platform="linux", home=home,
                    environ={"USER": "someone", "BRAIN_STATE": "/state"}, key=lambda: "box-aaaaaaaa",
                    here=lambda: {"claude_account": "someone@example.com"}, tasks_here=lambda: ["t1"], run=run,
@@ -272,6 +273,70 @@ def test_probe_macos():
           caps)
 
 
+def test_probe_windows():
+    caps = M.probe(which={"schtasks": "C:\\Windows\\System32\\schtasks.exe", "git": "C:\\Git\\cmd\\git.exe"}.get,
+                   exists=lambda p: False, platform="win32", home="C:\\Users\\someone",
+                   environ={"USERNAME": "someone"}, key=lambda: "win-cccccccc", here=lambda: None,
+                   tasks_here=lambda: [], run=runner(""))
+    check("Windows: named as such, Task Scheduler is the scheduler, the user is USERNAME",
+          caps["os"] == "Windows" and caps["scheduler"] == "schtasks" and caps["user"] == "someone", caps)
+    check("Windows: no chrome.exe, no Chrome", caps["chrome"]["installed"] is False, caps["chrome"])
+    check("Windows: the Remote Control restart hint is the Task Scheduler one",
+          "schtasks /Run /TN second-brain-remote-control" in M.RC_RESTART["schtasks"])
+
+
+def test_probe_windows_chrome():
+    local = "C:\\Users\\someone\\AppData\\Local"
+    chrome_exe = local + "\\Google\\Chrome\\Application\\chrome.exe"
+    host = "HKEY_CURRENT_USER\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.anthropic.claude_code_browser_extension"
+    calls = []
+
+    def run(cmd):
+        calls.append(list(cmd))
+        if cmd[0] == "tasklist":
+            return 0, "chrome.exe                   4242 Console      1    210,000 K\n"
+        if cmd[:2] == ["reg", "query"]:
+            return 0, "\nHKEY_CURRENT_USER\\Software\\Google\\Chrome\\NativeMessagingHosts\n" + host + "\n"
+        return 127, ""
+    state = '{"profile": {"info_cache": {"Default": {}, "Profile 1": {}}, "show_picker_on_startup": true}}'
+    read = lambda p: state if p == local + "\\Google\\Chrome\\User Data\\Local State" else None
+    env = {"USERNAME": "someone", "LOCALAPPDATA": local, "ProgramFiles": "C:\\Program Files",
+           "ProgramFiles(x86)": "C:\\Program Files (x86)"}
+    base = dict(which={"schtasks": "x"}.get, platform="win32", home="C:\\Users\\someone", environ=env,
+                key=lambda: "w", here=lambda: None, tasks_here=lambda: [])
+    caps = M.probe(isfile=lambda p: p == chrome_exe, exists=lambda p: p.endswith(".credentials.json"), run=run,
+                   read=read, **base)
+    c = caps["chrome"]
+    check("Windows: chrome.exe under LOCALAPPDATA is an installed Chrome", c["installed"] is True, c)
+    check("Windows: the host key under HKCU\\...\\NativeMessagingHosts means paired", c["paired"] is True, c)
+    check("Windows: chrome.exe in tasklist means running", c["running"] is True, c)
+    check("Windows: the probes asked tasklist and reg query",
+          ["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/NH"] in calls
+          and ["reg", "query", "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts"] in calls, calls)
+    check("Windows: the picker is read from Local State, the login from ~/.claude",
+          c["picker_blocks"] is True and c["login"] == "present" and "desktop" not in c, c)
+    check("Windows: the Browser line reads like the others",
+          "**usable**" in M.render(caps) and "Chrome paired, running" in M.render(caps), M.render(caps))
+    for root in ("C:\\Program Files", "C:\\Program Files (x86)"):
+        exe = root + "\\Google\\Chrome\\Application\\chrome.exe"
+        check("Windows: chrome.exe under %s is found" % root,
+              M.probe(isfile=lambda p, e=exe: p == e, exists=lambda p: False, run=lambda c: (127, ""), **base)
+              ["chrome"]["installed"] is True)
+    nohost = M.probe(isfile=lambda p: p == chrome_exe, exists=lambda p: False, read=lambda p: None,
+                     run=lambda c: (0, "") if c[0] == "reg" else (0, "INFO: No tasks are running which match the specified criteria."),
+                     **base)["chrome"]
+    check("Windows: no host key is not paired, and 'INFO: No tasks' is not running",
+          nohost["paired"] is False and nohost["running"] is False and nohost["login"] == "absent", nohost)
+    check("Windows: a failing tasklist is unknown, not an exception",
+          M.probe(isfile=lambda p: p == chrome_exe, exists=lambda p: False, read=lambda p: None,
+                  run=lambda c: (127, ""), **base)["chrome"]["running"] is None)
+    nochrome = M.probe(isfile=lambda p: False, exists=lambda p: False, run=lambda c: (127, ""), **base)["chrome"]
+    check("Windows: no chrome.exe is no Chrome", nochrome == {"installed": False, "paired": False}, nochrome)
+    check("the tasklist and reg parsers are pure",
+          M.chrome_running_windows("INFO: No tasks are running") is False
+          and M.native_hosts_windows("HKEY_CURRENT_USER\\Software\\Google\\Chrome\\NativeMessagingHosts\\a.b\n") == ["a.b"])
+
+
 def test_probe_never_raises():
     def boom(*a, **k):
         raise RuntimeError("probe failed")
@@ -313,7 +378,7 @@ def test_real_probe_is_fast():
 
 
 def main():
-    for t in (test_render, test_own_chrome, test_devices_file, test_picker, test_probe_linux, test_probe_macos, test_probe_never_raises, test_section,
+    for t in (test_render, test_own_chrome, test_devices_file, test_picker, test_probe_linux, test_probe_macos, test_probe_windows, test_probe_windows_chrome, test_probe_never_raises, test_section,
               test_real_probe_is_fast):
         print("\n== %s ==" % t.__name__)
         try:

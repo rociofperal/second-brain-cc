@@ -55,6 +55,10 @@ def run(candidates, args, clt, stdin="", extra_env=None):
 
 
 def main():
+    if sys.platform == "win32":
+        print("  skipped on Windows: pywrap.sh is the POSIX sh interpreter picker that launchd starts "
+              "daemons through; Windows has no launchd and no sh to run it")
+        return finish()
     tmp = tempfile.mkdtemp(prefix="pywrap-test-")
     try:
         clt = os.path.join(tmp, "CommandLineTools")

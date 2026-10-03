@@ -3,7 +3,7 @@
 
 The vault NEVER stores credentials: it stores `kp://Group/Entry#password` references
 that resolve against a local KeePass database (.kdbx) chosen by its owner at first run
-(`kp.py init --db PATH`, or BRAIN_KP_DB). macOS and Linux.
+(`kp.py init --db PATH`, or BRAIN_KP_DB). macOS, Linux and Windows.
 
   kp.py status                      state of the kdbx, the lock and the cache
   kp.py init --db PATH [--keyfile PATH] [--create [--no-password]]
@@ -37,6 +37,7 @@ except Exception:                                   # kp.py must work without th
     STATE = os.path.join(os.path.expanduser("~"), ".claude", "state", "brain")
 
 import kp_backend as KPB                            # backend resolution and argv translation
+import osproc                                      # portable process groups (no start_new_session on Windows)
 try:
     import machine_identity as MI                   # whose lock is it, beyond the hostname
 except Exception:                                   # kp.py must work on its own
@@ -264,13 +265,14 @@ def _key_is_mine(value):
 
 
 def pid_alive(pid):
+    import osproc
     try:
-        os.kill(int(pid), 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except Exception:
+        n = int(pid)
+    except (TypeError, ValueError):
         return True                      # when in doubt, assume alive
+    if n <= 0:
+        return True                      # not a pid: an unparseable lock line never clears a lock
+    return osproc.pid_state(n) is not False
 
 
 def host_reach(host):
@@ -378,7 +380,7 @@ def ask_confirm(title_, body, button):
             return False
         return p.returncode == 0
     if how == "tty":
-        if not sys.stdin.isatty():
+        if not osproc.isatty(sys.stdin):
             return False
         try:
             return input("%s\n%s\nType yes to %s: " % (title_, body, button)).strip().lower() == "yes"
@@ -444,9 +446,9 @@ def write_lock():
     Two Claude sessions at once are the norm on this machine, and keepassxc-cli does not
     take the lock on its own: without this, two simultaneous `put`s clobber each other."""
     os.makedirs(STATE, exist_ok=True)
-    import fcntl
+    import oslock
     fh = open(os.path.join(STATE, "kp.write.lock"), "w")
-    fcntl.flock(fh, fcntl.LOCK_EX)
+    oslock.lock(fh)
     own = False
     try:
         # `if not os.path.exists(): open(..., "w")` was a race: between the two
@@ -487,7 +489,7 @@ def write_lock():
                 os.remove(lock_path())
             except Exception:
                 pass
-        fcntl.flock(fh, fcntl.LOCK_UN)
+        oslock.unlock(fh)
         fh.close()
 
 
@@ -681,7 +683,7 @@ def get_master(interactive=True):
     if not interactive:
         return None, False
     pw = ask_dialog()
-    if not pw and not NOPROMPT and sys.stdin.isatty():
+    if not pw and not NOPROMPT and osproc.isatty(sys.stdin):
         import getpass
         try:
             pw = getpass.getpass("Master for %s: " % os.path.basename(DB))
@@ -1106,7 +1108,7 @@ def cli_clip(entry, attr, seconds, master):
     cmd = [CLI, "clip", "-q"] + _key_args()
     cmd += ["-a", attr, DBF[0], entry, str(seconds)]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, start_new_session=True)
+                            stderr=subprocess.PIPE, text=True, **osproc.new_group_kwargs())
     try:
         proc.stdin.write(_master_stdin(master)); proc.stdin.flush()
     except Exception:
@@ -1542,7 +1544,10 @@ def cmd_get(a):
     if a.pipe:
         val = cli(["show", "-s", "-a", attr, DB, entry], pw).stdout
         val = val[:-1] if val.endswith("\n") else val
-        p = subprocess.run(["/bin/sh", "-c", a.pipe], input=val + "\n", text=True)
+        if sys.platform == "win32":      # no /bin/sh: the command goes through cmd.exe
+            p = subprocess.run(a.pipe, shell=True, input=(val + "\n").encode("utf-8"))   # bytes: no \r\n translation
+        else:
+            p = subprocess.run(["/bin/sh", "-c", a.pipe], input=val + "\n", text=True)
         sys.exit(p.returncode)
     if a.show:
         sys.stderr.write("kp: WARNING — the secret ends up written in this conversation.\n")
@@ -1752,7 +1757,7 @@ def cmd_rm(a):
     if not a.yes:
         print("about to delete: %s" % entry)
         for r in refs:
-            print("  a vault note points at it: %s" % r)
+            print("  a vault note points at it: %s" % r.replace(os.sep, "/"))
         die("nothing was deleted. Pass --yes to confirm.", EXIT_LOCKED)
     guard_lock(a.force)
     backup_path = backup()
@@ -1761,7 +1766,7 @@ def cmd_rm(a):
         verify_or_restore(backup_path, pw)
     print("deleted: %s" % entry)
     for r in refs:
-        print("still points at it, now broken: %s" % r)
+        print("still points at it, now broken: %s" % r.replace(os.sep, "/"))
     print("backup: %s" % os.path.basename(backup_path))
 
 

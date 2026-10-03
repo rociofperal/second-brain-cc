@@ -267,12 +267,12 @@ def test_cli_rules(D):
     print("\n== the CLI template and path ==")
     check("~ expands to the home directory in every token",
           D.expand_home(["~/.local/bin/claude", "-p", "~", "--add-dir", "~/git/x"], "/h")
-          == ["/h/.local/bin/claude", "-p", "/h", "--add-dir", "/h/git/x"])
+          == [os.path.join("/h", ".local", "bin", "claude"), "-p", "/h", "--add-dir", os.path.join("/h", "git", "x")])
     check("~user and a tilde inside a word are left alone",
           D.expand_home(["~other/x", "a~b"], "/h") == ["~other/x", "a~b"])
     check("the template splits like a shell and expands ~",
           D.template_tokens("~/.local/bin/claude -p {prompt} --output-format json", "/h")
-          == ["/h/.local/bin/claude", "-p", "{prompt}", "--output-format", "json"])
+          == [os.path.join("/h", ".local", "bin", "claude"), "-p", "{prompt}", "--output-format", "json"])
     check("a template with broken quoting is no command", D.template_tokens('claude -p "{prompt}', "/h") == [])
 
     home = "/home/someone"

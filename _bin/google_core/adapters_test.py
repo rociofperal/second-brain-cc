@@ -180,13 +180,19 @@ def test_files():
     acct = D.Account("work", login_hint="me@example.com")
     store.save({"work": acct})
     check("the registry round-trips", store.load() == {"work": acct})
-    check("and is private (0600)", stat.S_IMODE(os.stat(store.path).st_mode) == 0o600)
+    if sys.platform == "win32":
+        print("  skipped on Windows: the file is private (0600) (no POSIX mode bits)")
+    else:
+        check("and is private (0600)", stat.S_IMODE(os.stat(store.path).st_mode) == 0o600)
     log = AD.JsonlSendLog(os.path.join(d, "state", "logs", "mail-sent.jsonl"))
     log.append({"to": "a@b.co"})
     log.append({"to": "c@d.co"})
     lines = open(log.path).read().splitlines()
     check("the send log gets one JSON line per send", [json.loads(l)["to"] for l in lines] == ["a@b.co", "c@d.co"], lines)
-    check("and is private (0600)", stat.S_IMODE(os.stat(log.path).st_mode) == 0o600)
+    if sys.platform == "win32":
+        print("  skipped on Windows: the file is private (0600) (no POSIX mode bits)")
+    else:
+        check("and is private (0600)", stat.S_IMODE(os.stat(log.path).st_mode) == 0o600)
     env = {"BRAIN_STATE": os.path.join(d, "s")}
     check("the send log path is BRAIN_MAIL_SENT_LOG when set",
           AD.sent_log_path(dict(env, BRAIN_MAIL_SENT_LOG="/x/log.jsonl")) == "/x/log.jsonl")

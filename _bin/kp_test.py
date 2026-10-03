@@ -18,6 +18,10 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 KP = os.path.join(HERE, "kp.py")
+sys.path.insert(0, HERE)
+from testbin import fake_exe  # noqa: E402  the fake keepassxc-cli also runs on Windows
+
+IS_WINDOWS = sys.platform == "win32"
 
 ok, fail = [], []
 
@@ -39,10 +43,8 @@ def world(root, db=None):
     home, state = os.path.join(root, "home"), os.path.join(root, "state")
     os.makedirs(home, exist_ok=True)
     os.makedirs(state, exist_ok=True)
-    fake = os.path.join(root, "keepassxc-cli")
-    with open(fake, "w") as fh:
-        fh.write(FAKE_CLI.replace("{dir}", root))
-    os.chmod(fake, 0o755)
+    # Rewriting the script at <root>/keepassxc-cli later changes what the fake does on Windows too.
+    fake = fake_exe(os.path.join(root, "keepassxc-cli"), FAKE_CLI.replace("{dir}", root))
     env = {k: v for k, v in os.environ.items() if not k.startswith("BRAIN_")}
     env.update(HOME=home, BRAIN_STATE=state, BRAIN_KP_STATE=state, BRAIN_VAULT=os.path.dirname(HERE),
                BRAIN_KP_CLI=fake, BRAIN_KP_NOPROMPT="1", BRAIN_KP_CACHE_BACKEND="none")
@@ -65,10 +67,7 @@ exit 1
 
 def keyfile_world(root, fake_body):
     env, state = world(root)
-    fake = os.path.join(root, "keepassxc-cli")
-    with open(fake, "w") as fh:
-        fh.write(fake_body.replace("{dir}", root))
-    os.chmod(fake, 0o755)
+    fake_exe(os.path.join(root, "keepassxc-cli"), fake_body.replace("{dir}", root))
     db = os.path.join(root, "store.kdbx")
     open(db, "wb").write(b"\x03\xd9\xa2\x9a" + b"\0" * 2048)
     keyfile = os.path.join(root, "store.key")
@@ -121,7 +120,7 @@ def test_keyfile_only(root):
     # This fake opens with anything, so make it refuse --no-password, and refuse a call with no
     # key file at all, as the real one does: a password + key file store.
     fake2 = os.path.join(root, "kf2", "keepassxc-cli")
-    with open(fake2, "w") as fh:
+    with open(fake2, "w", newline="\n") as fh:      # sh reads LF only, Windows included
         fh.write(FAKE_CLI.replace("{dir}", os.path.join(root, "kf2")).replace(
             "exit 0", 'for a in "$@"; do [ "$a" = "--no-password" ] && exit 1; done\n'
                       'for a in "$@"; do [ "$a" = "-k" ] && exit 0; done\nexit 1'))
@@ -368,7 +367,7 @@ def main():
         cfg = json.load(open(cfg_path)) if os.path.exists(cfg_path) else {}
         check("init records the database in the config", rc == 0 and cfg.get("db") == db, (rc, out, err, cfg))
         check("the config file is private (0600)",
-              os.path.exists(cfg_path) and stat.S_IMODE(os.stat(cfg_path).st_mode) == 0o600)
+              os.path.exists(cfg_path) and (IS_WINDOWS or stat.S_IMODE(os.stat(cfg_path).st_mode) == 0o600))
         rc2, out2, _ = run(env, "init", "--db", db)
         check("init again with the same answer changes nothing", rc2 == 0 and "unchanged" in out2, out2)
         rc, out, err = run(env, "status")

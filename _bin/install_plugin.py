@@ -36,6 +36,7 @@ import difflib
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -45,10 +46,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import pycmd
+
 KINDS = ("skills", "agents")
-IGNORED_NAMES = {".git", "node_modules", "__pycache__", ".DS_Store"}
+# Dependencies and caches a skill may create in its own folder (a Python venv, browsers downloaded by
+# Playwright, tool caches) are machine-local, can hold tens of thousands of files, and are never part
+# of the skill: they are not copied, compared or back-ported.
+IGNORED_NAMES = {".git", "node_modules", "__pycache__", ".DS_Store", ".venv", "venv", "ms-playwright",
+                 ".cache", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox"}
 IGNORED_SUFFIXES = (".pyc",)
-_IGNORE = shutil.ignore_patterns(".git", "node_modules", "__pycache__", "*.pyc", ".DS_Store")
+_IGNORE = shutil.ignore_patterns(*sorted(IGNORED_NAMES), "*.pyc")
 
 
 # ---------------------------------------------------------------- pure rules
@@ -94,47 +101,96 @@ def _files(path):
 PLACEHOLDER = "__VAULT__"
 
 
-def _unlocalized(data, vault):
+# On Windows a skill that runs `/usr/bin/python3 __VAULT__/_bin/x.py` must start Python in UTF-8 mode
+# with the interpreter this machine has: the install writes `"<python.exe>" -X utf8 "<vault>\\_bin\\x.py"`
+# there (pycmd.windows_python: one canonical python.exe, never pythonw.exe). A skill may also say bare
+# `python3 __VAULT__/_bin/x.py`; that one is written with the flag in its attached spelling, `-Xutf8`
+# (the same option to Python), so the back-port can tell the two apart and restore each exactly.
+_POSIX_RUN = re.compile(r"/usr/bin/python3 __VAULT__/_bin/([A-Za-z0-9_.\-]+\.py)")
+_BARE_RUN = re.compile(r"(?<![\w/.\-])python3 __VAULT__/_bin/([A-Za-z0-9_.\-]+\.py)")
+_WIN_FLAGS = {"-X utf8": "/usr/bin/python3", "-Xutf8": "python3"}
+
+
+def localize_text(text, vault, platform=None, executable=None):
+    """Canonical skill text for this machine: `__VAULT__` becomes the vault path. Windows: the
+    canonical `/usr/bin/python3 __VAULT__/_bin/x.py` (and bare `python3 ...`) first becomes the UTF-8
+    mode command."""
+    if pycmd.is_windows(platform):
+        def run(m, flags):
+            line = pycmd.hook_command("%s/_bin/%s" % (vault, m.group(1)), platform="win32", executable=executable)
+            return line.replace(" -X utf8 ", " %s " % flags, 1)
+        text = _POSIX_RUN.sub(lambda m: run(m, "-X utf8"), text)
+        text = _BARE_RUN.sub(lambda m: run(m, "-Xutf8"), text)
+    return text.replace(PLACEHOLDER, vault)
+
+
+def delocalize_text(text, vault, platform=None, executable=None):
+    """The inverse of localize_text: the vault path becomes `__VAULT__` again.
+
+    Windows: any quoted python.exe / pythonw.exe / python3.exe / py.exe running a script of this
+    vault's _bin turns back, whichever interpreter wrote it and whichever one runs now (a skill
+    installed from a terminal and back-ported by the guardian under pythonw.exe), so no machine's
+    interpreter ever reaches the canonical copy. `executable` is accepted and not needed."""
+    if pycmd.is_windows(platform):
+        run = re.compile(r'"(?:[^"]*[\\/])?(?i:(?:python|pythonw|python3|py)\.exe)" (-X utf8|-Xutf8) "'
+                         + re.escape(pycmd.win_path(vault) + "\\_bin\\") + r'([A-Za-z0-9_.\-]+\.py)"')
+        text = run.sub(lambda m: "%s __VAULT__/_bin/%s" % (_WIN_FLAGS[m.group(1)], m.group(2)), text)
+    return text.replace(vault, PLACEHOLDER)
+
+
+def _unlocalized(data, vault, reverse=None):
+    if reverse is not None and vault:
+        try:
+            return reverse(data.decode("utf-8")).encode("utf-8")
+        except UnicodeDecodeError:
+            return data
     return data.replace(vault.encode("utf-8"), PLACEHOLDER.encode("utf-8")) if vault else data
 
 
-def digest(path, vault=None):
+def digest(path, vault=None, reverse=None):
     """sha256 of a file, or of a directory's relative paths and contents. None when missing.
 
     With `vault`, that path is read as `__VAULT__` first: how a live copy is compared with the
-    canonical one it was installed from."""
+    canonical one it was installed from. `reverse` (text -> text) replaces that plain replacement."""
     if os.path.isfile(path):
         with open(path, "rb") as fh:
-            return hashlib.sha256(_unlocalized(fh.read(), vault)).hexdigest()
+            return hashlib.sha256(_unlocalized(fh.read(), vault, reverse)).hexdigest()
     if not os.path.isdir(path):
         return None
     h = hashlib.sha256()
     for rel in _files(path):
         with open(os.path.join(path, rel), "rb") as fh:
-            h.update(rel.encode("utf-8") + b"\0" + hashlib.sha256(_unlocalized(fh.read(), vault)).digest())
+            h.update(rel.encode("utf-8") + b"\0" + hashlib.sha256(_unlocalized(fh.read(), vault, reverse)).digest())
     return h.hexdigest()
 
 
-def _rewrite_text(path, old, new):
-    """Replace `old` with `new` in every text file at `path` (a file or a directory). Binary files stay."""
+def _rewrite_text(path, old, new=None):
+    """Replace `old` with `new` in every text file at `path` (a file or a directory). Binary files stay.
+    `old` may instead be a function text -> text."""
+    fn = old if callable(old) else (lambda text: text.replace(old, new) if old in text else text)
     targets = [path] if os.path.isfile(path) else [os.path.join(path, rel) for rel in _files(path)]
     for target in targets:
         try:
-            with open(target, encoding="utf-8") as fh:
+            with open(target, encoding="utf-8", newline="") as fh:   # keep CRLF as it is
                 text = fh.read()
         except (UnicodeDecodeError, OSError):
             continue
-        if old in text:
+        converted = fn(text)
+        if converted != text:
             mode = os.stat(target).st_mode
-            with open(target, "w", encoding="utf-8") as fh:
-                fh.write(text.replace(old, new))
+            with open(target, "w", encoding="utf-8", newline="") as fh:
+                fh.write(converted)
             os.chmod(target, mode)
 
 
 class Syncer:
-    def __init__(self, plugin_dir, claude_dir, state_dir, clock=time.time, log=None, vault=None):
+    def __init__(self, plugin_dir, claude_dir, state_dir, clock=time.time, log=None, vault=None,
+                 platform=None, executable=None):
         self.plugin_dir, self.claude_dir, self.state_dir = plugin_dir, claude_dir, state_dir
         self.vault = vault
+        # Windows only: skills run Python in UTF-8 mode with `executable` (localize_text). Injectable for tests.
+        self.platform, self.executable = platform, executable
+        self._windows = bool(vault) and pycmd.is_windows(platform)
         self.clock = clock
         self.log = log or (lambda s: None)
 
@@ -170,6 +226,28 @@ class Syncer:
             json.dump(data, fh, indent=1, sort_keys=True)
         os.replace(tmp, self.manifest_path)
 
+    def _reverse(self):
+        """text -> text turning the live copy back into canonical, or None for the plain path swap."""
+        if not self._windows:
+            return None
+        return lambda text: delocalize_text(text, self.vault, self.platform, self.executable)
+
+    def _to_live(self):
+        """The `rewrite` for an install (canonical -> live), None without a vault."""
+        if not self.vault:
+            return None
+        if self._windows:
+            return (lambda text: localize_text(text, self.vault, self.platform, self.executable),)
+        return (PLACEHOLDER, self.vault)
+
+    def _to_canonical(self):
+        """The `rewrite` for a back-port (live -> canonical), None without a vault."""
+        if not self.vault:
+            return None
+        if self._windows:
+            return (self._reverse(),)
+        return (self.vault, PLACEHOLDER)
+
     # -- planning
 
     def plan(self):
@@ -179,7 +257,7 @@ class Syncer:
             for name in sorted(self._names(self.plugin_dir, kind) | self._names(self.claude_dir, kind)):
                 key = "%s/%s" % (kind, name)
                 v = digest(self._path(self.plugin_dir, kind, name))
-                l = digest(self._path(self.claude_dir, kind, name), self.vault)
+                l = digest(self._path(self.claude_dir, kind, name), self.vault, self._reverse())
                 items.append({"kind": kind, "name": name, "key": key, "vault": v, "live": l,
                               "base": base.get(key), "action": decide(v, l, base.get(key))})
         return items
@@ -223,7 +301,9 @@ class Syncer:
             try:
                 al = open(a, encoding="utf-8").read().splitlines(True) if os.path.isfile(a) else []
                 bl = open(b, encoding="utf-8").read() if os.path.isfile(b) else ""
-                bl = (bl.replace(self.vault, PLACEHOLDER) if self.vault else bl).splitlines(True)
+                if self.vault:
+                    bl = self._reverse()(bl) if self._windows else bl.replace(self.vault, PLACEHOLDER)
+                bl = bl.splitlines(True)
             except UnicodeDecodeError:
                 out.append("Binary file %s differs\n" % (rel or name))
                 continue
@@ -273,17 +353,15 @@ class Syncer:
                 elif action == "install":
                     if i["live"] is not None:
                         entry["backup"] = self._backup(self.claude_dir, kind, name, "live")
-                    self._replace(vault_path, live_path, kind,
-                                  (PLACEHOLDER, self.vault) if self.vault else None)
-                    manifest[key] = digest(live_path, self.vault)
+                    self._replace(vault_path, live_path, kind, self._to_live())
+                    manifest[key] = digest(live_path, self.vault, self._reverse())
                 elif install_only and action in ("backport", "conflict"):
                     entry["action"] = "%s (skipped: install only)" % action
                 elif action == "backport":
                     if i["vault"] is not None:
                         entry["backup"] = self._backup(self.plugin_dir, kind, name, "vault")
                         entry["diff"] = self._diff(kind, name)
-                    self._replace(live_path, vault_path, kind,
-                                  (self.vault, PLACEHOLDER) if self.vault else None)
+                    self._replace(live_path, vault_path, kind, self._to_canonical())
                     manifest[key] = digest(vault_path)
                 elif action == "conflict":
                     entry["backups"] = [self._backup(self.plugin_dir, kind, name, "vault"),

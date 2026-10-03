@@ -40,4 +40,4 @@ def unlocked_notice(raw, vault):
     return ("Brain: %d shared note(s) changed without vw.py, so unlocked and with no "
             "secret redaction: %s. Write 10-Projects/ and 70-Entities/ with "
             "`python3 ~/Brain/_bin/vw.py`." % (
-                len(raw), ", ".join(os.path.relpath(n, vault) for n in raw[:3])))
+                len(raw), ", ".join(os.path.relpath(n, vault).replace(os.sep, "/") for n in raw[:3])))

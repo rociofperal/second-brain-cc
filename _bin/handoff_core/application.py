@@ -7,7 +7,6 @@ where redeemed files land are decided in domain.py.
 from __future__ import annotations
 
 import json
-import posixpath
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -56,7 +55,7 @@ class Redeemed:
 def _sweep(ports, directory) -> int:
     n = 0
     for name in D.to_sweep(ports.files.listdir(directory), ports.clock.now()):
-        ports.files.remove(posixpath.join(directory, name))
+        ports.files.remove(D.join(directory, name))
         n += 1
     return n
 
@@ -99,7 +98,7 @@ def issue(ports, to=None, with_db=False, ttl_min=D.DEFAULT_TTL_MIN) -> Issued:
     mac = D.mac(passphrase, ciphertext)
 
     swept = 0
-    shared_handoff = posixpath.join(src.shared_dir, D.HANDOFF_SUBDIR) if src.shared_dir else None
+    shared_handoff = D.join(src.shared_dir, D.HANDOFF_SUBDIR) if src.shared_dir else None
     if shared_handoff and shared_handoff != directory:
         swept += _sweep(ports, shared_handoff)
     if transport == "inline":
@@ -111,7 +110,7 @@ def issue(ports, to=None, with_db=False, ttl_min=D.DEFAULT_TTL_MIN) -> Issued:
 
     ports.files.make_private_dir(directory)
     swept += _sweep(ports, directory)
-    location = posixpath.join(directory, D.handoff_file_name(handoff_id))
+    location = D.join(directory, D.handoff_file_name(handoff_id))
     ports.files.write_private(location, ciphertext, overwrite=False)
     token = D.Token(transport, handoff_id, passphrase, issued_at, ttl, mac, directory=directory)
     return Issued(D.encode_token(token), transport, location, ttl, settings, swept, notes)
@@ -127,12 +126,12 @@ def _find_file(ports, token, from_dir):
         dirs.append(from_dir)
     local_shared = ports.machine.local_shared()
     if token.transport == "shared" and local_shared:
-        dirs.append(posixpath.join(local_shared, D.HANDOFF_SUBDIR))
+        dirs.append(D.join(local_shared, D.HANDOFF_SUBDIR))
     if token.directory:
         dirs.append(token.directory)
     dirs = [d for i, d in enumerate(dirs) if d not in dirs[:i]]
     for d in dirs:
-        path = posixpath.join(d, name)
+        path = D.join(d, name)
         if ports.files.exists(path):
             return path
     raise D.HandoffError("%s is not in %s: it was already redeemed, swept after an hour, or the folder has not "

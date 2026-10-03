@@ -148,9 +148,14 @@ def main():
         import brain_paths
         home = tmpdir()
         scratch_log = os.path.join(tmpdir(), "main.log")
-        saved_iso = {k: os.environ.get(k) for k in ("HOME", "BRAIN_STATE", "BRAIN_CLAUDE_MAIN_LOG")}
+        saved_iso = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "BRAIN_STATE",
+                                                    "BRAIN_CLAUDE_MAIN_LOG")}
         try:
             os.environ["HOME"] = home
+            if sys.platform == "win32":     # "~" and the default state directory come from these, not HOME
+                os.environ["USERPROFILE"] = home
+                os.environ["LOCALAPPDATA"] = os.path.join(home, "AppData", "Local")
+                os.environ["APPDATA"] = os.path.join(home, "AppData", "Roaming")
             os.environ.pop("BRAIN_STATE", None)
             os.environ["BRAIN_CLAUDE_MAIN_LOG"] = scratch_log
             default_state = brain_paths.state_dir(environ={}, home=home)
@@ -185,7 +190,7 @@ def main():
                   code == 0 and EA.run_watch_tick.calls and EA.run_agent_watch.calls, (code, out))
 
             os.environ.pop("BRAIN_STATE", None)
-            os.environ["BRAIN_CLAUDE_MAIN_LOG"] = os.path.join(home, "Library", "Logs", "Claude", "main.log")
+            os.environ["BRAIN_CLAUDE_MAIN_LOG"] = W.real_claude_main_log()
             code, out = tick_fresh()
             check("BRAIN_CLAUDE_MAIN_LOG naming the real main.log ticks on the real state",
                   code == 0 and EA.run_watch_tick.calls, (code, out))

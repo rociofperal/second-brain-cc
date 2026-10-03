@@ -42,6 +42,12 @@ def scratch():
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": paths["home"], "TMPDIR": root,
            "BRAIN_STATE": paths["state"], "BRAIN_VAULT": paths["vault"], "BRAIN_OFFLINE": "1",
            "PYTHONDONTWRITEBYTECODE": "1", "GIT_CEILING_DIRECTORIES": root}
+    if sys.platform == "win32":
+        # A Python started without SYSTEMROOT cannot initialise its random numbers; ~ is USERPROFILE there.
+        env.update({k: os.environ[k] for k in ("SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT")
+                    if os.environ.get(k)})
+        env.update(USERPROFILE=paths["home"], LOCALAPPDATA=os.path.join(paths["home"], "AppData", "Local"),
+                   APPDATA=os.path.join(paths["home"], "AppData", "Roaming"), TEMP=root, TMP=root, PYTHONUTF8="1")
     return root, env, paths
 
 

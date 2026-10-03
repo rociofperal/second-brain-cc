@@ -5,7 +5,9 @@ Golden rules:
   - Nothing here may raise an exception into a hook. Every path has a fallback.
   - Python 3.9 stdlib only (no pyyaml, no rg, no node on this machine).
 """
-import os, re, sys, json, time, fcntl, sqlite3, hashlib, functools, unicodedata, traceback
+import os, re, sys, json, time, sqlite3, hashlib, functools, unicodedata, traceback
+import osproc
+import oslock                                   # flock on POSIX, msvcrt on Windows
 
 VAULT = os.environ.get("BRAIN_VAULT") or os.path.join(os.path.expanduser("~"), "Brain")
 DB    = os.path.join(VAULT, "_index", "vault.db")
@@ -65,13 +67,39 @@ _HOOK_ERROR = {}    # {"exc": class name} when fail_open swallowed an exception 
 
 def _read_stdin_json(timeout):
     try:
-        if sys.stdin is None or sys.stdin.isatty():
+        if sys.stdin is None or osproc.isatty(sys.stdin):
             return {}
-        import select
-        ready, _, _ = select.select([sys.stdin], [], [], timeout)
-        if not ready:
-            return {}
-        raw = sys.stdin.read()
+        if sys.platform == "win32":
+            # select() only takes sockets on Windows: read on a thread and wait for it instead.
+            import threading
+            # Raw os.read, not sys.stdin.read(): a daemon thread blocked inside the BufferedReader
+            # holds its lock and can abort the interpreter at shutdown ("could not acquire lock").
+            buf = bytearray()
+            done = []
+
+            def _pump():
+                try:
+                    while True:
+                        chunk = os.read(0, 65536)
+                        if not chunk:
+                            break
+                        buf.extend(chunk)
+                except Exception:
+                    pass
+                done.append(1)
+
+            reader = threading.Thread(target=_pump, daemon=True)
+            reader.start()
+            reader.join(timeout)
+            if not done:
+                return {}
+            raw = bytes(buf).decode("utf-8")
+        else:
+            import select
+            ready, _, _ = select.select([sys.stdin], [], [], timeout)
+            if not ready:
+                return {}
+            raw = sys.stdin.read()
         return json.loads(raw) if raw.strip() else {}
     except Exception:
         return {}
@@ -305,7 +333,7 @@ class flock(object):
             deadline = time.time() + self.timeout
             while True:
                 try:
-                    fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    oslock.lock(self.fh, blocking=False)
                     self.held = True
                     break
                 except (IOError, OSError):
@@ -320,7 +348,7 @@ class flock(object):
         try:
             if self.fh:
                 if self.held:
-                    fcntl.flock(self.fh, fcntl.LOCK_UN)
+                    oslock.unlock(self.fh)
                 self.fh.close()
         except Exception:
             pass
@@ -1021,7 +1049,14 @@ def run(cmd, cwd=None, timeout=10):
     return rc, out, err
 
 
-GIT = "/usr/bin/git"
+def _find_git():
+    if os.path.exists("/usr/bin/git"):          # macOS/Linux: the system git, as always
+        return "/usr/bin/git"
+    import shutil                               # Windows (Git for Windows) or a non-standard prefix
+    return shutil.which("git") or "/usr/bin/git"
+
+
+GIT = _find_git()
 
 
 def repo_root(cwd):
@@ -1062,9 +1097,37 @@ def pid_alive(pid):
     """Is this PID a live process? Valid for a session's PID when it is the long-lived
     Claude Code process captured by `claude_session_pid()` (NOT the hook's OWN pid, which
     dies in milliseconds). The `sessions` table is per-machine, so the check is local."""
+    if sys.platform == "win32":
+        return _pid_alive_windows(pid)
     try:
         os.kill(int(pid), 0)
         return True
+    except Exception:                    # incl. PermissionError: another user's process is not our session
+        return False
+
+
+def _pid_alive_windows(pid):
+    """Alive and ours: access denied (a process of another user) counts as not ours, as
+    PermissionError does on POSIX. osproc.pid_state cannot tell that case from 'alive'."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        pid = int(pid)
+        if pid <= 0:
+            return False
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = k32.OpenProcess(0x1000, False, pid)    # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False                 # gone, or access denied
+        try:
+            code = wintypes.DWORD()
+            return bool(k32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+        finally:
+            k32.CloseHandle(handle)
     except Exception:
         return False
 
@@ -1506,7 +1569,7 @@ PRESENCE_OLD = os.path.join(VAULT, "90-Meta", "presencia")
 
 
 def _machine():
-    return (os.uname().nodename or "?").split(".")[0]
+    return (__import__("platform").node() or "?").split(".")[0]
 
 
 def _presence_files():
@@ -1628,16 +1691,30 @@ def is_real_project(slug):
     return bool(project_note(slug))
 
 
+def _detached():
+    """Popen arguments for a fire-and-forget worker: a new session on POSIX, a detached process
+    group with no console window on Windows (osproc.detached_kwargs)."""
+    import osproc
+    return osproc.detached_kwargs()
+
+
+def _spawn_detached(argv, **kw):
+    """Popen a fire-and-forget worker with _detached(); on Windows, retried without breaking away
+    from the parent's job object when that job forbids it (osproc.spawn_detached)."""
+    import osproc
+    return osproc.spawn_detached(argv, **kw)
+
+
 def _lease_async(action, rel, sid):
     if not rel or not sid or OFFLINE:
         return
     try:
         import subprocess
-        subprocess.Popen(
+        _spawn_detached(
             [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                           "lease.py"), action, rel, "--sid", sid],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True)
+            stderr=subprocess.DEVNULL)
     except Exception as e:
         log_error("brainlib._lease_async", e)
 
@@ -1654,7 +1731,7 @@ def presence_beat_async(sid, project=None):
     """Fires the local presence heartbeat WITHOUT waiting for it. Never on a hook's path.
 
     A fresh interpreter, a lock and a walk of the presence directory cost more than a
-    hook's budget of tens of milliseconds. It is detached with `start_new_session=True` so
+    hook's budget of tens of milliseconds. It is detached (`_detached()`: a new session) so
     it neither dies with the session nor holds it, and what the hooks read is the cache it
     leaves behind — a 0.1 ms `open()`.
     """
@@ -1662,12 +1739,12 @@ def presence_beat_async(sid, project=None):
         return
     try:
         import subprocess
-        subprocess.Popen(
+        _spawn_detached(
             [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                           "presence.py"),
              "beat", "--sid", sid, "--project", project or "-"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True)
+            stderr=subprocess.DEVNULL)
     except Exception as e:
         log_error("brainlib.presence_beat_async", e)
 
@@ -1677,12 +1754,12 @@ def presence_withdraw_async(sid, project=None):
         return
     try:
         import subprocess
-        subprocess.Popen(
+        _spawn_detached(
             [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                           "presence.py"),
              "withdraw", "--sid", sid, "--project", project or "-"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True)
+            stderr=subprocess.DEVNULL)
     except Exception:
         pass
 

@@ -86,10 +86,10 @@ def maybe_reindex():
         return
     try:
         open(stamp, "w").write(str(time.time()))
-        subprocess.Popen(["/usr/bin/python3",
-                          os.path.join(B.VAULT, "_bin", "index_vault.py")],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+        import osproc
+        python = sys.executable if sys.platform == "win32" else "/usr/bin/python3"
+        osproc.spawn_detached([python, os.path.join(B.VAULT, "_bin", "index_vault.py")],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 

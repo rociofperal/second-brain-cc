@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import brainlib as B
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PY3 = "/usr/bin/python3"
+PY3 = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else (sys.executable or "python3")
 
 
 def job_lines(job_control):

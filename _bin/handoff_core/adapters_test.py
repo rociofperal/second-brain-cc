@@ -22,6 +22,7 @@ sys.path[0] = os.path.dirname(HERE)
 
 ok, fail = [], []
 TMP = []
+WIN = sys.platform == "win32"
 
 
 def check(name, cond, detail=""):
@@ -138,14 +139,17 @@ def test_files():
     f = AD.LocalFiles()
     target = os.path.join(root, "a", "b", "key")
     f.write_private(target, b"K", overwrite=False)
-    check("a written file is mode 600", stat.S_IMODE(os.stat(target).st_mode) == 0o600)
-    check("a created parent is mode 700", stat.S_IMODE(os.stat(os.path.dirname(target)).st_mode) == 0o700)
+    if WIN:
+        print("  skipped on Windows: file mode 600 / directory mode 700 (Windows has no POSIX mode bits)")
+    else:
+        check("a written file is mode 600", stat.S_IMODE(os.stat(target).st_mode) == 0o600)
+        check("a created parent is mode 700", stat.S_IMODE(os.stat(os.path.dirname(target)).st_mode) == 0o700)
     _, exc = outcome(f.write_private, target, b"X", overwrite=False)
     check("it refuses to overwrite without the flag", isinstance(exc, D.HandoffError) and open(target, "rb").read() == b"K",
           exc)
     f.write_private(target, b"X", overwrite=True)
     check("with it, it overwrites and stays 600", open(target, "rb").read() == b"X"
-          and stat.S_IMODE(os.stat(target).st_mode) == 0o600)
+          and (WIN or stat.S_IMODE(os.stat(target).st_mode) == 0o600))
     other = os.path.join(root, "victim")
     open(other, "wb").write(b"V")
     link = os.path.join(root, "link")
@@ -154,10 +158,14 @@ def test_files():
     f.write_private(link, b"NEW", overwrite=True)
     check("overwriting a symlink replaces the link, never writes through it",
           open(other, "rb").read() == b"V" and not os.path.islink(link))
-    os.chmod(other, 0o644)
-    check("a 644 file is not private, a 600 one is", not f.is_private(other) and f.is_private(target))
-    f.make_private_dir(os.path.join(root, "handoff"))
-    check("the handoff dir is 700", stat.S_IMODE(os.stat(os.path.join(root, "handoff")).st_mode) == 0o700)
+    if WIN:
+        print("  skipped on Windows: 644 is not private / handoff dir is 700 (no POSIX mode bits)")
+        f.make_private_dir(os.path.join(root, "handoff"))
+    else:
+        os.chmod(other, 0o644)
+        check("a 644 file is not private, a 600 one is", not f.is_private(other) and f.is_private(target))
+        f.make_private_dir(os.path.join(root, "handoff"))
+        check("the handoff dir is 700", stat.S_IMODE(os.stat(os.path.join(root, "handoff")).st_mode) == 0o700)
     names = [n for n, _ in f.listdir(root)]
     check("listdir gives names and times", "victim" in names and all(isinstance(t, float) for _, t in f.listdir(root)))
     check("listdir of a missing dir is empty", f.listdir(os.path.join(root, "nope")) == [])
@@ -184,13 +192,14 @@ def test_machine():
     check("the database comes from the kp config, ~ expanded", s.db == os.path.join(home, "Sync", "brain.kdbx"), s)
     check("the keyfile and group come from it too", s.keyfile == os.path.join(home, "k.key") and s.group == "Agents", s)
     check("the shared and files dirs come from their own configs",
-          s.shared_dir == os.path.join(home, "Sync") and s.files_dir == os.path.join(home, "BrainFiles"), s)
+          os.path.normpath(s.shared_dir) == os.path.join(home, "Sync")
+          and os.path.normpath(s.files_dir) == os.path.join(home, "BrainFiles"), s)
     check("the Google account names are read, never anything else", sorted(s.google_accounts) == ["personal", "work"], s)
     m = AD.LocalMachine(environ=dict(env, BRAIN_KP_DB="/elsewhere/x.kdbx", BRAIN_KP_KEYFILE="/k2"), home=home)
     check("BRAIN_KP_DB and BRAIN_KP_KEYFILE win, as they do in kp.py",
           m.describe().db == "/elsewhere/x.kdbx" and m.describe().keyfile == "/k2")
     check("the state dir is the Brain state dir", m.state == state and m.home == home)
-    check("the local shared dir is this machine's", m.local_shared() == os.path.join(home, "Sync"))
+    check("the local shared dir is this machine's", os.path.normpath(m.local_shared()) == os.path.join(home, "Sync"))
     bare = AD.LocalMachine(environ={"HOME": home, "BRAIN_STATE": tmpdir()}, home=home)
     check("an unconfigured machine describes nothing", bare.describe().db == "" and bare.local_shared() is None)
 
@@ -230,7 +239,10 @@ def test_kp_init():
     written = json.load(open(config))
     check("an older kp.py without --keyfile: the config is written the way kp.py writes it",
           good and written == {"db": "/d.kdbx", "keyfile": "/k.key", "group": "Brain", "inbox": "/i"}, (detail, written))
-    check("and it is mode 600", stat.S_IMODE(os.stat(config).st_mode) == 0o600)
+    if WIN:
+        print("  skipped on Windows: the config is mode 600 (no POSIX mode bits)")
+    else:
+        check("and it is mode 600", stat.S_IMODE(os.stat(config).st_mode) == 0o600)
     check("kp.py init is not run with a secret on its command line either",
           all("pass" not in " ".join(json.loads(line)) for line in open(os.path.join(root, "calls"))))
 

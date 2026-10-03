@@ -80,11 +80,18 @@ def test_scheduler_rules(D):
           D.detect_scheduler("linux", which_all, {}) == "cron")
     check("Linux with only crontab uses cron", D.detect_scheduler("linux", which_cron, {}) == "cron")
     check("nothing at all is none", D.detect_scheduler("linux", which_none, {}) == "none")
+    check("Windows uses Task Scheduler, through schtasks.exe",
+          D.detect_scheduler("win32", lambda n: "C:\\Windows\\System32\\schtasks.exe" if n == "schtasks" else None, {})
+          == "schtasks")
+    check("and Windows without it has none, never cron or systemd",
+          D.detect_scheduler("win32", which_cron, {}) == "none" and D.detect_scheduler("win32", which_none, {}) == "none")
+    check("Task Scheduler is a scheduler the state accepts", "schtasks" in D.SCHEDULERS)
     check("the jobs are the guardian, sync, tasks and the file watch, each described",
           [j for j, _ in D.JOBS] == ["guardian", "sync", "tasks", "watch"] and all(desc for _, desc in D.JOBS))
     check("labels match the job templates",
           D.job_label("launchd", "guardian") == "com.secondbrain.guardian"
-          and D.job_label("systemd", "sync") == "second-brain-sync" and D.job_label("cron", "watch") == "second-brain-watch")
+          and D.job_label("systemd", "sync") == "second-brain-sync" and D.job_label("cron", "watch") == "second-brain-watch"
+          and D.job_label("schtasks", "guardian") == "second-brain-guardian")
     check("the scheduler answer is the shape the guardian reads",
           D.scheduler_state("systemd", ["guardian", "sync"]) == {"kind": "systemd", "jobs": ["guardian", "sync"]})
 
@@ -97,10 +104,11 @@ def test_answers_and_text(D):
     check("an unclear answer is None, so the question is asked again", D.parse_yes_no("perhaps", False) is None)
     check("one plain address is a valid email", D.valid_email("me@example.com") and not D.valid_email("me at example"))
     check("macOS keeps the default database in Documents",
-          D.default_kdbx_path("darwin", "/home/u") == "/home/u/Documents/brain.kdbx")
+          D.default_kdbx_path("darwin", "/home/u") == os.path.join("/home/u", "Documents", "brain.kdbx"))
+    check("so does Windows", D.default_kdbx_path("win32", "C:/Users/u") == os.path.join("C:/Users/u", "Documents", "brain.kdbx"))
     check("Linux keeps it under ~/.local/share/brain",
-          D.default_kdbx_path("linux", "/home/u") == "/home/u/.local/share/brain/brain.kdbx")
-    snippets = D.mcp_snippets("/srv/vault", "python3")
+          D.default_kdbx_path("linux", "/home/u") == os.path.join("/home/u", ".local", "share", "brain", "brain.kdbx"))
+    snippets = D.mcp_snippets("/srv/vault", "python3", platform="linux")
     check("MCP registration snippets exist for Claude Code, Claude Desktop, Cursor-style clients and OpenCode",
           set(snippets) == {"claude-code", "claude-desktop", "json-clients", "opencode"}, sorted(snippets))
     check("each names this vault's server.py",
@@ -114,8 +122,8 @@ def test_answers_and_text(D):
 
 def test_remote_control_rules(D):
     print("\n== Remote Control ==")
-    check("only a supervisor that restarts a long-lived process can keep the server: launchd and systemd, not cron",
-          D.SUPERVISORS == ("launchd", "systemd"), D.SUPERVISORS)
+    check("only a supervisor that restarts a long-lived process can keep the server: launchd, systemd and Windows "
+          "Task Scheduler, not cron", D.SUPERVISORS == ("launchd", "systemd", "schtasks"), D.SUPERVISORS)
     check("its job labels match the supervisor templates in _bin",
           D.job_label("launchd", D.REMOTE_CONTROL_JOB) == "com.secondbrain.remote-control"
           and D.job_label("systemd", D.REMOTE_CONTROL_JOB) == "second-brain-remote-control")
@@ -123,7 +131,7 @@ def test_remote_control_rules(D):
           D.default_remote_dir("/home/u", "workstation", "/home/u/Brain") == "/home/u",
           D.default_remote_dir("/home/u", "workstation", "/home/u/Brain"))
     check("never the vault itself, even on a case-insensitive disk",
-          D.default_remote_dir("/Users/U", "brain", "/users/u") == "/Users/U/brain",
+          D.default_remote_dir("/Users/U", "brain", "/users/u") == os.path.join("/Users/U", "brain"),
           D.default_remote_dir("/Users/U", "brain", "/users/u"))
     check("a name is letters, digits, dots, dashes and underscores",
           D.valid_label("workstation") and D.valid_label("build-box_2.lan") and not D.valid_label("")
@@ -147,6 +155,9 @@ def test_remote_control_rules(D):
           text)
     check("on macOS they point at the launchd log",
           "remote-control.log" in D.verify_text("workstation", "launchd"), D.verify_text("workstation", "launchd"))
+    text = D.verify_text("workstation", "schtasks")
+    check("on Windows they point at the task and at its log",
+          "schtasks /Query /TN second-brain-remote-control" in text and "second-brain-remote-control.log" in text, text)
     state = D.record(D.new_state(), "scheduler", "done", {}, NOW)
     state = D.record(state, "remote_control", "done", {"kind": "systemd", "dir": "/home/u/w", "name": "w"}, NOW)
     check("its answer round-trips like any other step", D.parse_state(json.dumps(state)) == state)

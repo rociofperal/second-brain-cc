@@ -5,11 +5,11 @@ type: decision
 area: [harness]
 projects: []
 tags: [machines, portability, macos, linux, session-start, capabilities, skills, scheduled-tasks, decision]
-status: active
+status: superseded
 confidence: high
 source: agent
 provenance: "generalized from real incidents in a working vault; names and numbers are illustrative"
-updated: 2026-09-21
+updated: 2026-10-03
 supersedes: []
 ---
 
@@ -51,6 +51,8 @@ block, and at run time confirms with a real call (for a browser, see
   [[2026-09-21-convention-scheduled-task-resources-checked-per-machine]].
 
 ## Links
+
+Superseded by [[2026-10-03-decision-supported-environments-macos-linux-and-windows]], which adds Windows.
 
 - [[2026-09-21-decision-machine-identity-is-a-stable-id-plus-a-human-label]]
 - [[2026-09-15-decision-brain-machinery-independent-of-claude-app-and-account]]

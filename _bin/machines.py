@@ -23,6 +23,7 @@ machines_core.py, which touches no disk; this file only reads, writes and asks t
 import datetime as dt
 import json
 import os
+import platform as _platform
 import re
 import subprocess
 import sys
@@ -74,7 +75,7 @@ def describe(environ=None, run=None, platform=None, hostname=None, open_=None):
         m = _KEY_FRAGMENT.match(forced.lower())
         frag, label = (m.group(2), forced[:len(m.group(1))]) if m else ("", forced)
     else:
-        hostname = hostname if hostname is not None else os.uname().nodename
+        hostname = hostname if hostname is not None else _platform.node()
         uuid = machine_identity.read_uuid(platform, machine_identity._run, open_ or open)
         key, frag, label = machine_identity.machine_key(hostname, uuid), machine_identity.id8(uuid), \
             machine_identity.machine_label(hostname)

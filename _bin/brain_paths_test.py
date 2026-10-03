@@ -30,7 +30,7 @@ def main():
         home = "/home/someone"
         got = BP.state_dir(environ={}, home=home, platform="darwin")
         check("on macOS the default is ~/Library/Application Support/brain",
-              got == "/home/someone/Library/Application Support/brain", got)
+              got == os.path.join(home, "Library", "Application Support", "brain"), got)
         check("the default is never under ~/.claude", ".claude" not in got, got)
 
         got = BP.state_dir(environ={"BRAIN_STATE": "/srv/brain-state"}, home=home, platform="darwin")
@@ -42,17 +42,17 @@ def main():
 
         got = BP.state_dir(environ={"BRAIN_STATE": "  "}, home=home, platform="darwin")
         check("a blank BRAIN_STATE is ignored",
-              got == "/home/someone/Library/Application Support/brain", got)
+              got == os.path.join(home, "Library", "Application Support", "brain"), got)
 
         got = BP.state_dir(environ={}, home="/home/x", platform="linux")
         check("elsewhere the default follows XDG: ~/.local/state/brain",
-              got == "/home/x/.local/state/brain", got)
+              got == os.path.join("/home/x", ".local", "state", "brain"), got)
         got = BP.state_dir(environ={"XDG_STATE_HOME": "/var/xdg"}, home="/home/x", platform="linux")
-        check("and honours XDG_STATE_HOME when set", got == "/var/xdg/brain", got)
+        check("and honours XDG_STATE_HOME when set", got == os.path.join("/var/xdg", "brain"), got)
 
         print("\n== effective_state_dir (migration-aware) ==")
-        legacy = "/home/someone/.claude/state/brain"
-        new_dir = "/home/someone/Library/Application Support/brain"
+        legacy = os.path.join(home, ".claude", "state", "brain")
+        new_dir = os.path.join(home, "Library", "Application Support", "brain")
         check("the legacy location is ~/.claude/state/brain", BP.legacy_state_dir(home) == legacy,
               BP.legacy_state_dir(home))
 
@@ -70,6 +70,13 @@ def main():
         got = BP.effective_state_dir(environ={"BRAIN_STATE": "/srv/x"}, home=home, platform="darwin",
                                      **world(dirs={legacy}))
         check("BRAIN_STATE wins over both", got == "/srv/x", got)
+
+        got = BP.state_dir(environ={"LOCALAPPDATA": r"C:\Users\u\AppData\Local"}, home=r"C:\Users\u", platform="win32")
+        check("on Windows the state lives in %LOCALAPPDATA%\\brain",
+              got == os.path.join(r"C:\Users\u\AppData\Local", "brain"), got)
+        got = BP.state_dir(environ={}, home=r"C:\Users\u", platform="win32")
+        check("on Windows without LOCALAPPDATA it falls back to ~/AppData/Local/brain",
+              got == os.path.join(r"C:\Users\u", "AppData", "Local", "brain"), got)
 
         real = BP.state_dir()
         check("called with no arguments it resolves from the real environment",

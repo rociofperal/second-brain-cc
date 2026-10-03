@@ -88,8 +88,11 @@ def test_digest(IP):
         skill(root, "x", "body")
     write(os.path.join(b, "skills", "x", "__pycache__", "run.cpython-39.pyc"), "junk")
     write(os.path.join(b, "skills", "x", ".DS_Store"), "junk")
+    for dep in (".venv/Lib/site-packages/babel/x.py", "venv/bin/python", "node_modules/a/index.js",
+                "ms-playwright/chromium-1234/chrome.exe", ".cache/x"):
+        write(os.path.join(b, "skills", "x", *dep.split("/")), "junk")
     da, db = IP.digest(os.path.join(a, "skills", "x")), IP.digest(os.path.join(b, "skills", "x"))
-    check("the same skill digests the same, caches and .DS_Store ignored", da == db and da, (da, db))
+    check("the same skill digests the same: caches, .DS_Store, venvs, node_modules and Playwright browsers ignored", da == db and da, (da, db))
     write(os.path.join(b, "skills", "x", "scripts", "run.py"), "print('changed')\n")
     check("a change anywhere in the skill directory changes the digest", IP.digest(os.path.join(b, "skills", "x")) != da)
     check("a missing path has no digest", IP.digest(os.path.join(a, "skills", "nope")) is None)
@@ -207,8 +210,12 @@ def test_vault_placeholder(IP):
     s = IP.Syncer(plugin, claude, state, vault=vault)
     s.apply()
     live = read(os.path.join(claude, "skills", "placeholder", "SKILL.md"))
+    if sys.platform == "win32":     # Windows runs it as `"<python.exe>" -Xutf8 "<vault>\_bin\query.py"` (install_plugin)
+        wanted = '-Xutf8 "%s\\_bin\\query.py"' % os.path.normpath(vault)
+    else:
+        wanted = "python3 %s/_bin/query.py" % vault
     check("an installed skill names this vault where the canonical copy says __VAULT__",
-          "python3 %s/_bin/query.py" % vault in live and "__VAULT__" not in live, live)
+          wanted in live and "__VAULT__" not in live, live)
     check("in every text file of the skill, and in agents",
           read(os.path.join(claude, "skills", "placeholder", "scripts", "run.py")) == "VAULT = '%s'\n" % vault
           and vault + "/AGENTS.md" in read(os.path.join(claude, "agents", "scout.md")))
@@ -231,7 +238,7 @@ def test_cli():
     vault, home, state = os.path.join(root, "vault"), os.path.join(root, "home"), os.path.join(root, "state")
     skill(os.path.join(vault, "integrations", "claude-code", "plugin", "brain"), "cli-skill", "vault")
     os.makedirs(os.path.join(home, ".claude"))
-    env = dict(os.environ, BRAIN_VAULT=vault, HOME=home, BRAIN_STATE=state)
+    env = dict(os.environ, BRAIN_VAULT=vault, HOME=home, USERPROFILE=home, BRAIN_STATE=state)
     p = subprocess.run([sys.executable, os.path.join(HERE, "install_plugin.py"), "status"], env=env,
                        capture_output=True, text=True, timeout=60)
     check("status lists each skill and agent with its action and changes nothing",

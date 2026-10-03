@@ -36,6 +36,12 @@ def main():
         print("\nRESULT: %d passed, %d failed" % (len(ok), len(fail)))
         return 1
 
+    if sys.platform == "win32":
+        print("  skipped on Windows: running bootstrap.sh needs bash (on a plain Windows runner `bash` is the WSL "
+              "launcher, which has no distribution); bootstrap.py, its PowerShell wrapper and the Windows pieces are covered by _bin/windows_install_test.py")
+        print("\nRESULT: %d passed, %d failed" % (len(ok), len(fail)))
+        return 1 if fail else 0
+
     root = tempfile.mkdtemp(prefix="bootstrap-")
     try:
         vault = os.path.join(root, "vault")

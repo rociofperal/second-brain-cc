@@ -16,6 +16,11 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+from testbin import fake_exe  # noqa: E402
+
+IS_WINDOWS = sys.platform == "win32"
+# Windows: what a process needs from the parent's environment to start at all.
+WINDOWS_ENV = ("SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
 
 ok, fail = [], []
 TMP = []
@@ -45,6 +50,16 @@ echo "cwd=$(pwd)"
 echo "args=$*"
 echo "telemetry=${DISABLE_TELEMETRY:-unset} traffic=${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-unset}"
 echo "keep=${KEEP_ME:-unset}"
+"""
+# Windows: the same in Python (sh's $(pwd) would print an MSYS /c/... path). Run through a .cmd
+# launcher, which is_wrapper() counts as a wrapper the way it counts a shell script elsewhere.
+FAKE_CLAUDE_PY = """#!/usr/bin/env python3
+import os, sys
+print("cwd=" + os.getcwd())
+print("args=" + " ".join(sys.argv[1:]))
+print("telemetry=%s traffic=%s" % (os.environ.get("DISABLE_TELEMETRY") or "unset",
+                                   os.environ.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC") or "unset"))
+print("keep=" + (os.environ.get("KEEP_ME") or "unset"))
 """
 
 
@@ -83,7 +98,10 @@ def test_config(RC):
     check("with nothing recorded there is no config", RC.load(path) is None)
     written = RC.save(os.path.join(d, "workstation"), "workstation", config_path=path)
     check("save writes the file it names", written == path and os.path.exists(path), written)
-    check("privately", stat.S_IMODE(os.stat(path).st_mode) == 0o600, oct(stat.S_IMODE(os.stat(path).st_mode)))
+    if IS_WINDOWS:
+        print("  - privately, mode 0600 (skipped on Windows: no POSIX mode bits; the profile folder's ACL applies)")
+    else:
+        check("privately", stat.S_IMODE(os.stat(path).st_mode) == 0o600, oct(stat.S_IMODE(os.stat(path).st_mode)))
     check("and load reads it back",
           RC.load(path) == {"dir": os.path.join(d, "workstation"), "name": "workstation"}, RC.load(path))
     with open(path, "w") as fh:
@@ -93,7 +111,7 @@ def test_config(RC):
         json.dump({"dir": "/x"}, fh)
     check("a file without a name is no config", RC.load(path) is None)
     check("the file lives in the Brain state directory",
-          RC.config_file({"BRAIN_STATE": "/s"}, "/home/u") == "/s/remote-control.json",
+          RC.config_file({"BRAIN_STATE": "/s"}, "/home/u") == os.path.join("/s", "remote-control.json"),
           RC.config_file({"BRAIN_STATE": "/s"}, "/home/u"))
 
 
@@ -126,7 +144,7 @@ def test_find_claude(RC):
     d = tmpdir()
     local = os.path.join(d, ".local", "bin")
     os.makedirs(local)
-    exe = os.path.join(local, "claude")
+    exe = os.path.join(local, "claude.exe" if IS_WINDOWS else "claude")
     with open(exe, "w") as fh:
         fh.write("#!/bin/sh\n")
     os.chmod(exe, 0o755)
@@ -154,6 +172,57 @@ def test_find_claude(RC):
           not RC.is_wrapper("/n", lambda p: b"#!/usr/bin/env node\nrequire('x')\n"))
     check("a zsh wrapper is one", RC.is_wrapper("/z", lambda p: b"#!/bin/zsh\nexec y\n"))
     check("no CLI gives no warning", RC.warnings(None) == [])
+    check("on Windows the native installer's claude.exe is looked for, then npm's",
+          RC.candidates("win32") == ("~/.local/bin/claude.exe", "~/AppData/Roaming/npm/claude.cmd")
+          and RC.candidates("linux") == RC.CANDIDATES)
+    found = RC.find_claude({"PATH": "/p"}, d, which=lambda n, path=None: None, platform="win32")
+    check("and found there", found == (exe if IS_WINDOWS else None) or (not IS_WINDOWS and found is None), found)
+    check("a batch file standing in for claude is a wrapper",
+          RC.is_wrapper("C:/x/claude.cmd", lambda p: b"@echo off\r\nclaude.exe --flag %*\r\n"))
+    check("but not the shim npm writes for a global install",
+          not RC.is_wrapper("C:/npm/claude.cmd", lambda p: b'@ECHO off\r\nSET dp0=%~dp0\r\n"%dp0%\\node.exe" cli.js %*'))
+
+
+def test_serve_loop(RC):
+    print("\n== serve on Windows: the server is started again when it fails ==")
+
+    def world(codes, stop_after=None):
+        state = {"t": 0.0, "runs": [], "sleeps": [], "logs": []}
+
+        def run(argv, env):
+            state["runs"].append((argv, env))
+            code = codes.pop(0)
+            if isinstance(code, BaseException):
+                raise code
+            state["t"] += code[1] if isinstance(code, tuple) else 1
+            return code[0] if isinstance(code, tuple) else code
+
+        def sleep(s):
+            state["sleeps"].append(s)
+            state["t"] += s
+
+        stop = (lambda: len(state["runs"]) >= stop_after) if stop_after else (lambda: False)
+        rc = RC.serve_loop(["claude", "remote-control"], {"A": "1"}, run=run, sleep=sleep,
+                           clock=lambda: state["t"], stop=stop, log=state["logs"].append)
+        return rc, state
+
+    rc, s = world([1, 1, 1, 1, 1, 0])
+    check("a failing server is started again until it exits cleanly, and that is the exit status",
+          rc == 0 and len(s["runs"]) == 6 and s["runs"][0] == (["claude", "remote-control"], {"A": "1"}), s["runs"])
+    check("with a pause that grows while it keeps failing", s["sleeps"] == [5, 15, 30, 60, 60], s["sleeps"])
+    check("and a line in the log for each restart", len(s["logs"]) == 5 and "status 1" in s["logs"][0], s["logs"])
+    rc, s = world([1, 1, (1, 400), 1, 0])
+    check("a run that lasted starts the pauses over", s["sleeps"] == [5, 15, 5, 15], s["sleeps"])
+    rc, s = world([0])
+    check("a clean exit is not restarted", rc == 0 and len(s["runs"]) == 1 and s["sleeps"] == [])
+    rc, s = world([0xC000013A])
+    check("Ctrl+C in the server's console ends the loop", rc == 0xC000013A and s["sleeps"] == [])
+    rc, s = world([KeyboardInterrupt()])
+    check("so does Ctrl+C here", rc == 130 and len(s["runs"]) == 1)
+    rc, s = world([1, 1, 1], stop_after=2)
+    check("and being asked to stop", rc == 1 and len(s["runs"]) == 2, s)
+    rc, s = world([OSError("gone"), 0])
+    check("a server that cannot start is retried too, and said", rc == 0 and "could not start" in s["logs"][0], s["logs"])
 
 
 def test_serve():
@@ -162,12 +231,12 @@ def test_serve():
     bindir, state, repo = os.path.join(d, "bin"), os.path.join(d, "state"), os.path.join(d, "workstation")
     os.makedirs(bindir)
     os.makedirs(os.path.join(repo, ".git"))
-    fake = os.path.join(bindir, "claude")
-    with open(fake, "w") as fh:
-        fh.write(FAKE_CLAUDE)
-    os.chmod(fake, 0o755)
-    env = {"PATH": bindir + ":/usr/bin:/bin", "HOME": d, "BRAIN_STATE": state, "DISABLE_TELEMETRY": "1",
-           "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "KEEP_ME": "yes"}
+    fake_exe(os.path.join(bindir, "claude"), FAKE_CLAUDE_PY if IS_WINDOWS else FAKE_CLAUDE)
+    env = {"PATH": os.pathsep.join([bindir, "/usr/bin", "/bin"]), "HOME": d, "BRAIN_STATE": state,
+           "DISABLE_TELEMETRY": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "KEEP_ME": "yes"}
+    if IS_WINDOWS:
+        env.update({k: os.environ[k] for k in WINDOWS_ENV if os.environ.get(k)})
+        env.update(USERPROFILE=d, PYTHONUTF8="1")
     script = os.path.join(HERE, "remote_control.py")
     p = subprocess.run([sys.executable, script, "serve"], capture_output=True, text=True, env=env, timeout=30)
     check("with nothing recorded, serve refuses and says why",
@@ -232,7 +301,7 @@ def main():
     except Exception as exc:
         check("remote_control imports", False, "%s: %s" % (type(exc).__name__, exc))
     else:
-        for t in (test_command, test_env, test_config, test_problems, test_find_claude):
+        for t in (test_command, test_env, test_config, test_problems, test_find_claude, test_serve_loop):
             try:
                 t(RC)
             except Exception as exc:

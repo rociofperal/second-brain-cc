@@ -26,6 +26,10 @@ import urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[0] = os.path.dirname(HERE)
+from testbin import fake_exe  # noqa: E402  fake executables that also run on Windows
+
+IS_WINDOWS = sys.platform == "win32"
+GIT = "git" if IS_WINDOWS else "/usr/bin/git"
 
 ok, fail = [], []
 TMP = []
@@ -107,7 +111,7 @@ def test_launchd():
     vault, home = os.path.join(d, "Vault"), os.path.join(d, "Home")
     agents = os.path.join(home, "Library", "LaunchAgents")
     log = os.path.join(d, "launchctl.log")
-    fake = write(os.path.join(d, "launchctl"), FAKE_LAUNCHCTL % {"log": log}, mode=0o755)
+    fake = fake_exe(os.path.join(d, "launchctl"), FAKE_LAUNCHCTL % {"log": log})
     for label in ("com.test.loaded", "com.test.failed", "com.test.missing"):
         write(os.path.join(vault, "_bin", label + ".plist"), TEMPLATE % {"label": label})
     write(os.path.join(agents, "com.test.loaded.plist"), TEMPLATE % {"label": "com.test.loaded"})
@@ -150,7 +154,7 @@ def test_launchd_drift():
     agents = os.path.join(home, "Library", "LaunchAgents")
     backups = os.path.join(d, "state", "plist-backups")
     log = os.path.join(d, "launchctl.log")
-    fake = write(os.path.join(d, "launchctl"), FAKE_LAUNCHCTL % {"log": log}, mode=0o755)
+    fake = fake_exe(os.path.join(d, "launchctl"), FAKE_LAUNCHCTL % {"log": log})
     for label in ("com.test.loaded", "com.test.missing"):
         write(os.path.join(vault, "_bin", label + ".plist"), TEMPLATE % {"label": label})
     lc = AD.LaunchctlControl(vault=vault, home=home, uid=501, agents_dir=agents, launchctl=fake,
@@ -264,7 +268,7 @@ def test_raised_alerts():
 
 
 def git(cwd, *args):
-    p = subprocess.run(["/usr/bin/git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+    p = subprocess.run([GIT, "-c", "user.name=t", "-c", "user.email=t@example.com",
                         "-c", "init.defaultBranch=main"] + list(args),
                        cwd=cwd, capture_output=True, text=True)
     return p.returncode, p.stdout
@@ -318,7 +322,7 @@ def test_vault_probe():
 
 def config_lines(git_dir):
     """Every key=value in one config file, read by file so nothing global leaks in."""
-    p = subprocess.run(["/usr/bin/git", "config", "--file", os.path.join(git_dir, "config"), "--list"],
+    p = subprocess.run([GIT, "config", "--file", os.path.join(git_dir, "config"), "--list"],
                        capture_output=True, text=True)
     return sorted(p.stdout.splitlines())
 
@@ -348,9 +352,10 @@ def test_git_hooks():
     s = gh.status()
     check("an unset core.hooksPath reads as None", s.hooks_path is None, s)
     files = {f.name: f for f in s.files}
+    # Windows has no execute bit: every existing file counts as executable, and git runs hooks by shebang.
     check("every Brain git hook is listed, with whether it exists and is executable",
           sorted(files) == ["post-commit", "pre-commit"]
-          and files["pre-commit"].exists and not files["pre-commit"].executable
+          and files["pre-commit"].exists and files["pre-commit"].executable is IS_WINDOWS
           and files["post-commit"].exists and files["post-commit"].executable, s)
     check("reading changes no config", config_lines(os.path.join(vault, ".git")) == before)
 
@@ -362,7 +367,11 @@ def test_git_hooks():
           and set(before) <= set(after), (before, after))
     done, detail = gh.make_executable("pre-commit")
     mode = os.stat(os.path.join(vault, "githooks", "pre-commit")).st_mode & 0o777
-    check("make_executable adds the execute bits where read bits are", done and mode == 0o755, oct(mode))
+    if IS_WINDOWS:
+        print("  - make_executable adds the execute bits (skipped on Windows: no execute bits to set)")
+        check("make_executable still succeeds", done, detail)
+    else:
+        check("make_executable adds the execute bits where read bits are", done and mode == 0o755, oct(mode))
     s = gh.status()
     check("afterwards the repository reads healthy",
           s.hooks_path == "githooks" and AD.D.git_hooks_findings(s) == [], s)
@@ -403,10 +412,10 @@ def test_interpreter_probe():
     d = tmpdir()
     clt = os.path.join(d, "CLT")
     os.mkdir(clt)
-    broken = write(os.path.join(d, "broken"), "#!/bin/sh\necho 'xcrun: error' >&2\nexit 69\n", mode=0o755)
-    dev_only = write(os.path.join(d, "dev_only"),
-                     '#!/bin/sh\n[ "$DEVELOPER_DIR" = "%s" ] || exit 69\nexit 0\n' % clt, mode=0o755)
-    good = write(os.path.join(d, "good"), "#!/bin/sh\nexit 0\n", mode=0o755)
+    broken = fake_exe(os.path.join(d, "broken"), "#!/bin/sh\necho 'xcrun: error' >&2\nexit 69\n")
+    dev_only = fake_exe(os.path.join(d, "dev_only"),
+                        '#!/bin/sh\n[ "$DEVELOPER_DIR" = "%s" ] || exit 69\nexit 0\n' % clt)
+    good = fake_exe(os.path.join(d, "good"), "#!/bin/sh\nexit 0\n")
     missing = os.path.join(d, "missing")
 
     probe = AD.InterpreterHealthProbe(hook_python=broken, fallbacks=[dev_only, good, missing], clt=clt)
@@ -430,6 +439,11 @@ def test_interpreter_probe():
             os.environ["DEVELOPER_DIR"] = old
     check("the hooks' interpreter is judged without the caller's DEVELOPER_DIR (hooks do not have it)",
           st[0].ok is False, st)
+    win = AD.InterpreterHealthProbe.for_platform("win32", executable=r"C:\Python314\python.exe")
+    check("on Windows the probe judges the vault's own Python, with no macOS fallbacks",
+          win.hook_python == r"C:\Python314\python.exe" and win.fallbacks == [], (win.hook_python, win.fallbacks))
+    mac = AD.InterpreterHealthProbe.for_platform("darwin")
+    check("elsewhere the defaults are unchanged", mac.hook_python == "/usr/bin/python3" and mac.fallbacks)
 
 
 # ---------------------------------------------------------------- agent runner and routines
@@ -439,9 +453,8 @@ def test_agent_runner():
     print("\n== CliAgentRunner, load_agent_command, TasksRegistrySource ==")
     d = tmpdir()
     out = os.path.join(d, "agent-args.txt")
-    agent = write(os.path.join(d, "agent"),
-                  '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s"\necho agent-ran\n[ "$1" = "--fail" ] && exit 3\nexit 0\n' % out,
-                  mode=0o755)
+    agent = fake_exe(os.path.join(d, "agent"),
+                     '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s"\necho agent-ran\n[ "$1" = "--fail" ] && exit 3\nexit 0\n' % out)
     routine = write(os.path.join(d, "routine.md"),
                     "---\nid: r\nneeds_bridge: none\n---\n\nDo the thing, carefully.\n")
 
@@ -467,7 +480,7 @@ def test_agent_runner():
     check("no configured agent command is exit 127 saying so",
           not empty.available() and rc == 127 and "agent command" in se, (rc, se))
 
-    slow = write(os.path.join(d, "slow"), "#!/bin/sh\nsleep 5\n", mode=0o755)
+    slow = fake_exe(os.path.join(d, "slow"), "#!/bin/sh\nsleep 5\n")
     rc, _, se = AD.CliAgentRunner(slow, cwd=d).run(routine, timeout=1)
     check("an agent past its timeout is exit 124", rc == 124, (rc, se))
 
@@ -956,7 +969,7 @@ def test_systemd():
     vault, home = os.path.join(d, "Vault"), os.path.join(d, "Home")
     units = os.path.join(home, ".config", "systemd", "user")
     log = os.path.join(d, "systemctl.log")
-    fake = write(os.path.join(d, "systemctl"), FAKE_SYSTEMCTL % {"log": log}, mode=0o755)
+    fake = fake_exe(os.path.join(d, "systemctl"), FAKE_SYSTEMCTL % {"log": log})
     for label in ("second-brain-loaded", "second-brain-failed", "second-brain-missing"):
         write(os.path.join(vault, "_bin", "systemd", label + ".service"), SERVICE_TEMPLATE % {"label": label})
         write(os.path.join(vault, "_bin", "systemd", label + ".timer"), TIMER_TEMPLATE)
@@ -1006,7 +1019,7 @@ def test_systemd_long_lived():
     vault, home = os.path.join(d, "Vault"), os.path.join(d, "Home")
     units = os.path.join(home, ".config", "systemd", "user")
     log = os.path.join(d, "systemctl.log")
-    fake = write(os.path.join(d, "systemctl"), FAKE_SYSTEMCTL % {"log": log}, mode=0o755)
+    fake = fake_exe(os.path.join(d, "systemctl"), FAKE_SYSTEMCTL % {"log": log})
     write(os.path.join(vault, "_bin", "systemd", "second-brain-loaded.service"),
           SERVICE_TEMPLATE % {"label": "second-brain-loaded"})
     write(os.path.join(vault, "_bin", "systemd", "second-brain-loaded.timer"), TIMER_TEMPLATE)
@@ -1058,7 +1071,7 @@ def test_cron():
     print("\n== CronControl ==")
     d = tmpdir()
     vault, tab = os.path.join(d, "Vault"), os.path.join(d, "tab")
-    fake = write(os.path.join(d, "crontab"), FAKE_CRONTAB % {"tab": tab}, mode=0o755)
+    fake = fake_exe(os.path.join(d, "crontab"), FAKE_CRONTAB % {"tab": tab})
     for label, when in (("second-brain-guardian", "*/15 * * * *"), ("second-brain-sync", "*/10 * * * *")):
         write(os.path.join(vault, "_bin", "cron", label + ".cron"),
               "# comment\n%s /bin/sh /home/brain-origin/Brain/_bin/pywrap.sh /home/brain-origin/Brain/_bin/x.py\n" % when)
@@ -1090,6 +1103,155 @@ def test_cron():
     check("cron keeps no exit status to judge", cc.last_exit_ok("second-brain-sync")[0] is True)
     check("consent narrows the jobs",
           AD.CronControl(vault=vault, crontab=fake, allowed=["second-brain-sync"]).labels() == ["second-brain-sync"])
+
+
+SCHTASKS_GUARDIAN = {"description": "Second Brain: guardian", "script": "_bin/guardian.py", "args": ["repair"],
+                     "every_minutes": 15, "cwd": "vault"}
+SCHTASKS_SERVER = {"description": "Second Brain: server", "script": "_bin/remote_control.py", "args": ["serve"],
+                   "at_logon": True, "cwd": "home"}
+
+
+class FakeSchtasks:
+    """schtasks.exe as a function: records every call, answers /Query from a dict of registered tasks."""
+
+    def __init__(self):
+        self.calls, self.tasks, self.last_result = [], {}, {}
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(list(cmd))
+        args = cmd[1:]
+        name = args[args.index("/TN") + 1] if "/TN" in args else ""
+        out, rc = "", 0
+        if args[0] == "/Create":
+            with open(args[args.index("/XML") + 1], encoding="utf-16") as fh:
+                self.tasks[name] = fh.read()
+        elif args[0] == "/Query":
+            if name not in self.tasks:
+                rc, out = 1, ""
+            elif "/XML" in args:
+                out = self.tasks[name]
+            else:
+                out = '"HOST","\\%s","N/A","Ready","Interactive only","1/1/2026 0:00:00","%s","me"\n' % (
+                    name, self.last_result.get(name, "0"))
+        elif args[0] in ("/Run", "/End"):
+            rc = 0 if name in self.tasks else 1
+        return subprocess.CompletedProcess(cmd, rc, out, "")
+
+
+def test_schtasks():
+    print("\n== SchtasksControl (Windows Task Scheduler), with schtasks.exe faked ==")
+    d = tmpdir()
+    vault, home, tasks = os.path.join(d, "Vault"), os.path.join(d, "Home"), os.path.join(d, "state", "schtasks")
+    write(os.path.join(vault, "_bin", "schtasks", "second-brain-guardian.json"), json.dumps(SCHTASKS_GUARDIAN))
+    write(os.path.join(vault, "_bin", "schtasks", "second-brain-server.json"), json.dumps(SCHTASKS_SERVER))
+    fake = FakeSchtasks()
+    py = r"C:\Python314\pythonw.exe"
+    sc = AD.SchtasksControl(vault=vault, home=home, tasks_dir=tasks, run=fake, python=py,
+                            environ={"USERNAME": "rocio", "USERDOMAIN": "LAPTOP"}, clock=StepClock(),
+                            backup_dir=os.path.join(d, "backups"))
+    check("the jobs are the task templates the vault carries",
+          sc.labels() == ["second-brain-guardian", "second-brain-server"], sc.labels())
+    check("consent narrows them",
+          AD.SchtasksControl(vault=vault, tasks_dir=tasks, run=fake, python=py, environ={},
+                             allowed=["second-brain-server"]).labels() == ["second-brain-server"])
+    program, arguments, cwd = sc.command("second-brain-guardian")
+    jobrun = os.path.join(vault, "_bin", "jobrun.py")
+    script = os.path.join(vault, "_bin", "guardian.py")
+    check("the task runs the real Python in UTF-8 mode through jobrun.py, with the job's label and arguments",
+          program == py and arguments == subprocess.list2cmdline(
+              ["-X", "utf8", jobrun, "second-brain-guardian", script, "repair"]), (program, arguments))
+    check("a periodic job works in the vault, the server in the home directory",
+          cwd == vault and sc.command("second-brain-server")[2] == home)
+    xml = sc.render("second-brain-guardian")
+    check("a periodic job repeats on its interval from a fixed start, and starts when a run was missed",
+          "<Interval>PT15M</Interval>" in xml and "<StartBoundary>%s</StartBoundary>" % AD.SCHTASKS_START in xml
+          and "<StartWhenAvailable>true</StartWhenAvailable>" in xml and "LogonTrigger" not in xml, xml)
+    check("it runs as this user, only while logged on: no password stored, no administrator",
+          "<UserId>LAPTOP\\rocio</UserId>" in xml and "<LogonType>InteractiveToken</LogonType>" in xml
+          and "<RunLevel>LeastPrivilege</RunLevel>" in xml, xml)
+    check("one instance at a time, never stopped for running on battery",
+          "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>" in xml
+          and "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>" in xml)
+    server = sc.render("second-brain-server")
+    check("the server starts at logon, has no time limit and is restarted when it fails",
+          "<LogonTrigger>" in server and "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in server
+          and "<RestartOnFailure>" in server and "TimeTrigger" not in server, server)
+    import xml.dom.minidom as minidom
+    parsed = minidom.parseString(xml.replace('encoding="UTF-16"', 'encoding="UTF-8"').encode("utf-8"))
+    check("the render is well-formed Task Scheduler XML",
+          parsed.documentElement.tagName == "Task"
+          and parsed.getElementsByTagName("Command")[0].firstChild.data == py)
+
+    check("nothing is installed before install", not sc.installed("second-brain-guardian"))
+    done, detail = sc.install("second-brain-guardian")
+    recorded = os.path.join(tasks, "second-brain-guardian.xml")
+    check("install records the task in the state directory and registers it with schtasks /Create /XML",
+          done and detail == recorded and os.path.exists(recorded)
+          and ["schtasks", "/Create", "/TN", "second-brain-guardian", "/XML", recorded, "/F"] in fake.calls,
+          (detail, fake.calls))
+    check("the recorded file is the UTF-16 XML schtasks reads",
+          open(recorded, "rb").read()[:2] in (b"\xff\xfe", b"\xfe\xff") and sc._read_installed("second-brain-guardian") == xml)
+    check("an installed, registered and enabled task is loaded", sc.installed("second-brain-guardian")
+          and sc.is_loaded("second-brain-guardian") and not sc.is_loaded("second-brain-server"))
+    fake.tasks["second-brain-guardian"] = xml.replace("<Enabled>true</Enabled>\n    <Hidden>",
+                                                      "<Enabled>false</Enabled>\n    <Hidden>")
+    check("a task disabled by hand is not loaded", not sc.is_loaded("second-brain-guardian"))
+    fake.calls.clear()
+    done, _ = sc.bootstrap("second-brain-guardian")
+    check("bootstrap registers it again from the recorded file, and starts no periodic job by hand",
+          done and fake.calls == [["schtasks", "/Create", "/TN", "second-brain-guardian", "/XML", recorded, "/F"]]
+          and sc.is_loaded("second-brain-guardian"), fake.calls)
+    check("a zero Last Result is ok", sc.last_exit_ok("second-brain-guardian")[0] is True)
+    fake.last_result["second-brain-guardian"] = "267011"
+    check("a task that never ran yet is ok", sc.last_exit_ok("second-brain-guardian")[0] is True)
+    fake.last_result["second-brain-guardian"] = "1"
+    good, detail = sc.last_exit_ok("second-brain-guardian")
+    check("a non-zero Last Result is not ok, and says so", good is False and "Last Result=1" in detail, detail)
+    good, detail = sc.last_exit_ok("second-brain-server")
+    check("a task schtasks does not know is not ok", good is False and "not known" in detail, detail)
+
+    sc.install("second-brain-server")
+    fake.calls.clear()
+    sc.bootstrap("second-brain-server")
+    check("bootstrapping the server also starts it now",
+          ["schtasks", "/Run", "/TN", "second-brain-server"] in fake.calls, fake.calls)
+    with open(os.path.join(tasks, "second-brain-server.xml"), "w", encoding="utf-16") as fh:
+        fh.write(server.replace("PT1M", "PT5M"))
+    check("a recorded task that differs from the template has drifted",
+          sc.drifted("second-brain-server") and not sc.drifted("second-brain-guardian"))
+    fake.calls.clear()
+    done, detail = sc.reinstall("second-brain-server")
+    check("reinstall backs the old task up, rewrites it and restarts the running server",
+          done and not sc.drifted("second-brain-server") and "backups" in detail
+          and fake.calls[-2:] == [["schtasks", "/End", "/TN", "second-brain-server"],
+                                  ["schtasks", "/Run", "/TN", "second-brain-server"]]
+          and len(os.listdir(os.path.join(d, "backups"))) == 1, (detail, fake.calls))
+    check("an uninstalled task is not drift", not AD.SchtasksControl(
+        vault=vault, tasks_dir=os.path.join(d, "none"), run=fake, python=py, environ={}).drifted("second-brain-guardian"))
+    check("self_label comes from BRAIN_JOB_LABEL, which jobrun.py sets",
+          AD.SchtasksControl(vault=vault, tasks_dir=tasks, run=fake, python=py,
+                             environ={"BRAIN_JOB_LABEL": "second-brain-guardian"}).self_label() == "second-brain-guardian")
+
+    def broken(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory", cmd[0])
+
+    done, detail = AD.SchtasksControl(vault=vault, tasks_dir=os.path.join(d, "t2"), run=broken, python=py,
+                                      environ={}).install("second-brain-guardian")
+    check("no schtasks.exe is a failed install with the reason, never an exception",
+          done is False and "FileNotFoundError" in detail, detail)
+    check("the vault carries a Task Scheduler template for every job, and the server",
+          sorted(AD.SchtasksControl(vault=os.path.dirname(os.path.dirname(HERE)), tasks_dir=tasks, run=fake,
+                                    python=py, environ={}).labels())
+          == sorted(AD.job_label("schtasks", j) for j in AD.JOBS + (AD.REMOTE_CONTROL,)))
+    real = AD.SchtasksControl(vault=os.path.dirname(os.path.dirname(HERE)), tasks_dir=tasks, run=fake, python=py,
+                              environ={})
+    check("and every one of them renders",
+          all("<Task " in real.render(l) for l in real.labels()), real.labels())
+    check("pythonw.exe is preferred when it sits next to python.exe (no console window every minute)",
+          AD.default_pythonw(os.path.join(d, "nope", "python.exe")) == os.path.join(d, "nope", "python.exe"))
+    pyd = os.path.join(d, "py")
+    write(os.path.join(pyd, "pythonw.exe"), "")
+    check("and found when it does", AD.default_pythonw(os.path.join(pyd, "python.exe")) == os.path.join(pyd, "pythonw.exe"))
 
 
 def test_job_consent():
@@ -1142,6 +1304,15 @@ def test_job_consent():
                             "steps": {"remote_control": dict(rc, kind="cron")}}))
     check("cron cannot supervise a server, so it never counts there",
           AD.consented_jobs(path) == ("cron", ["sync"]), AD.consented_jobs(path))
+    write(path, json.dumps({"scheduler": {"kind": "schtasks", "jobs": ["guardian", "watch"]},
+                            "steps": {"remote_control": dict(rc, kind="schtasks")}}))
+    check("on Windows the jobs are Task Scheduler tasks, and it can keep the server too",
+          AD.consented_jobs(path) == ("schtasks", ["guardian", "watch", "remote-control"]), AD.consented_jobs(path))
+    jc = AD.build_job_control(vault, state, home=os.path.join(d, "Home"))
+    check("the control is SchtasksControl, labelled second-brain-<job>, recording its tasks in the state dir",
+          isinstance(jc, AD.SchtasksControl)
+          and jc.allowed == {"second-brain-guardian", "second-brain-watch", "second-brain-remote-control"}
+          and jc.tasks_dir == os.path.join(state, "schtasks"), (jc, getattr(jc, "allowed", None)))
 
 
 def test_linux_notifier():
@@ -1160,6 +1331,121 @@ def test_linux_notifier():
     check("macOS uses osascript, Linux notify-send",
           isinstance(AD.default_notifier("darwin"), AD.OsascriptNotifier)
           and isinstance(AD.default_notifier("linux"), AD.NotifySendNotifier))
+    check("Windows shows a toast through PowerShell", isinstance(AD.default_notifier("win32"), AD.WindowsToastNotifier))
+    buf = io.StringIO()
+    AD.LogNotifier(buf).notify("Brain guardian", "1 new")
+    check("the line names the title and the message", buf.getvalue() == "notification: Brain guardian: 1 new\n",
+          buf.getvalue())
+
+
+def test_windows_toast():
+    print("\n== WindowsToastNotifier ==")
+    seen = []
+
+    def ok_run(cmd, **kw):
+        seen.append((cmd, kw))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    buf = io.StringIO()
+    AD.WindowsToastNotifier(run=ok_run, fallback=AD.LogNotifier(buf)).notify("Brain guardian", "2 new")
+    argv, kw = seen[0]
+    check("the argv is powershell.exe, the quiet flags, then the script",
+          argv[:6] == ["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command"]
+          and len(argv) == 7, argv)
+    script = argv[6]
+    check("the script uses ToastNotificationManager, a ToastText02 binding and PowerShell's own app id",
+          "ToastNotificationManager]::CreateToastNotifier" in script
+          and "template=''ToastText02''" in script
+          and "ToastText02" in script and "CreateToastNotifier('%s')" % AD.TOAST_APP_ID in script
+          and AD.TOAST_APP_ID == "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
+          and "<text id=''1''>Brain guardian</text><text id=''2''>2 new</text>" in script
+          and "LoadXml(" in script, script)
+    check("no console window, a 10 s timeout, no stdin, and no log line when the toast was shown",
+          kw.get("creationflags") == 0x08000000 and kw.get("timeout") == 10
+          and kw.get("stdin") == subprocess.DEVNULL and buf.getvalue() == "", (kw, buf.getvalue()))
+    seen.clear()
+    AD.WindowsToastNotifier(run=ok_run).notify("it's <b>&\"q\"", "a'b\nc & d > e")
+    script = seen[0][0][6]
+    check("quotes, < and & are escaped for XML, the XML's own quotes are doubled for PowerShell, newlines flattened",
+          "<text id=''1''>it&apos;s &lt;b&gt;&amp;&quot;q&quot;</text>" in script
+          and "<text id=''2''>a&apos;b c &amp; d &gt; e</text>" in script and "\n" not in script and '"' not in script, script)
+    seen.clear()
+    AD.WindowsToastNotifier(run=ok_run).notify("Zoë’s vault", "it\u2018s \u201aodd\u201b’; Remove-Item x")
+    script = seen[0][0][6]
+    body = script[script.index("LoadXml(") + len("LoadXml("):script.index("); [Windows.UI")]
+    check("typographic single quotes (U+2018-U+201B), which PowerShell also ends a '...' string on, reach it as "
+          "XML numeric references: the whole XML is still one PowerShell string",
+          not any(c in script for c in "\u2018\u2019\u201a\u201b")
+          and "<text id=''1''>Zoë&#x2019;s vault</text>" in script
+          and "<text id=''2''>it&#x2018;s &#x201A;odd&#x201B;&#x2019;; Remove-Item x</text>" in script
+          and body.startswith("'") and body.endswith("'") and "'" not in body[1:-1].replace("''", ""), script)
+    check("and _ps_quote doubles them too, should one ever reach it",
+          AD._ps_quote("a’b\u2018c'd") == "'a’’b\u2018\u2018c''d'")
+    for name, run in (("raises", lambda cmd, **kw: (_ for _ in ()).throw(OSError("no powershell"))),
+                      ("times out", lambda cmd, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd, 10))),
+                      ("exits non-zero", lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout="", stderr="x"))):
+        buf = io.StringIO()
+        _, exc = outcome(AD.WindowsToastNotifier(run=run, fallback=AD.LogNotifier(buf)).notify, "Brain guardian", "1 new")
+        check("when powershell %s the alert is still written as a log line, no exception" % name,
+              exc is None and buf.getvalue() == "notification: Brain guardian: 1 new\n", (exc, buf.getvalue()))
+
+    class BadFallback:
+        def notify(self, t, m):
+            raise RuntimeError("stderr closed")
+    _, exc = outcome(AD.WindowsToastNotifier(run=lambda c, **k: 1 / 0, fallback=BadFallback()).notify, "t", "m")
+    check("even a failing fallback never raises", exc is None, repr(exc))
+
+
+def test_agent_runner_npm_shim():
+    print("\n== CliAgentRunner: a .cmd npm shim is launched as node + script on Windows ==")
+    shim = "C:\\npm\\claude.cmd"
+    cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js"
+    text = ('@ECHO off\r\nIF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n) ELSE (\r\n  SET "_prog=node"\r\n)\r\n'
+            'endLocal & "%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n')
+    d = tmpdir()
+    routine = write(os.path.join(d, "routine.md"), "---\nid: r\n---\n\nLine one.\nLine two.\n")
+    launched = []
+
+    class Proc:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "out", ""
+
+    def popen(argv, **kw):
+        launched.append(argv)
+        return Proc()
+    files = {shim, cli, "C:\\npm\\node.exe"}
+    mk = lambda template, files=files, **kw: AD.CliAgentRunner(
+        template, popen=popen, platform="win32", environ={"PATHEXT": ".EXE;.CMD"}, isfile=files.__contains__,
+        read=lambda p: text, which=lambda n, path=None: None, **kw)
+    rc, _, _ = mk(["C:\\npm\\claude", "-p", "{prompt}"]).run(routine, 5)
+    check("a path that resolves to claude.cmd is run as node.exe + cli.js with the prompt whole",
+          rc == 0 and launched[-1] == ["C:\\npm\\node.exe", cli, "-p", "Line one.\nLine two."], launched)
+    mk(["C:\\npm\\claude.cmd", "-p", "{prompt}"]).run(routine, 5)
+    check("an explicit .cmd path too", launched[-1][:2] == ["C:\\npm\\node.exe", cli], launched[-1])
+    mk(["C:\\bin\\agent.exe", "-p", "{prompt}"], files={"C:\\bin\\agent.exe"}).run(routine, 5)
+    check("an .exe is left alone", launched[-1][0] == "C:\\bin\\agent.exe", launched[-1])
+    before = len(launched)
+    evil = write(os.path.join(d, "evil.md"), "---\nid: r\n---\n\nSay hi & calc.exe | del %USERPROFILE%\n")
+    rc, out, err = mk(["C:\\bin\\tool.cmd", "-p", "{prompt}"], files={"C:\\bin\\tool.cmd"}).run(evil, 5)
+    check("a .cmd that is no npm shim is never handed the routine text as an argument (cmd.exe would run `&`)",
+          rc == 126 and len(launched) == before and "cmd.exe" in err and "{prompt_file}" in err, (rc, err, launched[before:]))
+    rc, _, _ = mk(["C:\\bin\\tool.bat", "--file", "{prompt_file}"], files={"C:\\bin\\tool.bat"}).run(evil, 5)
+    check("with {prompt_file} it runs, and only the file's path is on its command line",
+          rc == 0 and launched[-1] == ["C:\\bin\\tool.bat", "--file", evil], launched[-1])
+    rc, _, _ = mk(["C:\\npm\\claude.cmd", "-p", "{prompt}"]).run(evil, 5)
+    check("an npm shim that unwraps still gets {prompt} (node, no cmd.exe)", rc == 0 and launched[-1][0] == "C:\\npm\\node.exe")
+    rc, _, _ = AD.CliAgentRunner(["/x/tool.cmd", "-p", "{prompt}"], popen=popen, platform="linux").run(evil, 5)
+    check("POSIX: a name ending in .cmd is not refused", rc == 0 and launched[-1][0] == "/x/tool.cmd")
+    r = AD.CliAgentRunner(["claude", "-p", "{prompt}"], popen=popen, platform="win32", isfile=files.__contains__,
+                          read=lambda p: text, which=lambda n, path=None: shim)
+    r.run(routine, 5)
+    check("a bare `claude` is looked up on PATH first, then unwrapped", launched[-1][:2] == ["C:\\npm\\node.exe", cli],
+          launched[-1])
+    r = AD.CliAgentRunner(["/x/claude", "-p", "{prompt}"], popen=popen, platform="linux")
+    r.run(routine, 5)
+    check("on POSIX nothing changes", launched[-1][0] == "/x/claude" and launched[-1][-1] == "Line one.\nLine two.",
+          launched[-1])
 
 
 def test_smtp_mailer():
@@ -1260,7 +1546,7 @@ def main():
                   test_raised_alerts, test_vault_probe, test_git_hooks, test_interpreter_probe, test_agent_runner,
                   test_mail_queue, test_gmail_mailer, test_token_pool_probe, test_desktop_tasks_probe,
                   test_routine_meta_source, test_hook_liveness_source, test_hook_probe,
-                  test_systemd, test_systemd_long_lived, test_cron, test_job_consent, test_linux_notifier, test_smtp_mailer):
+                  test_systemd, test_systemd_long_lived, test_cron, test_schtasks, test_job_consent, test_linux_notifier, test_windows_toast, test_agent_runner_npm_shim, test_smtp_mailer):
             try:
                 t()
             except Exception as exc:

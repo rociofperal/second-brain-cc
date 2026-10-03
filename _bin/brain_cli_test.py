@@ -86,11 +86,12 @@ def build_vault():
 
 
 def brain(env, *args, stdin=""):
-    return subprocess.run([CLI] + list(args), env=env, input=stdin, capture_output=True, text=True, timeout=180)
+    # a shebang script is not executable on Windows (WinError 193): run it with the interpreter there
+    return subprocess.run(([sys.executable] if sys.platform == "win32" else []) + [CLI] + list(args), env=env, input=stdin, capture_output=True, text=True, timeout=180)
 
 
 def main():
-    if not os.path.isfile(CLI) or not os.access(CLI, os.X_OK):
+    if not os.path.isfile(CLI) or (sys.platform != "win32" and not os.access(CLI, os.X_OK)):
         check("integrations/cli/brain exists and is executable", False, CLI)
         return finish()
     vault, env = build_vault()

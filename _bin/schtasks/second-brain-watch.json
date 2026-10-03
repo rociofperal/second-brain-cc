@@ -1,0 +1,7 @@
+{
+  "description": "Second Brain: fire file events: reindex, link repair, sync debounce (brain_watch.py tick). Installed by integrations/first-run; guardian.py keeps it in step.",
+  "script": "_bin/brain_watch.py",
+  "args": ["tick"],
+  "every_minutes": 1,
+  "cwd": "vault"
+}

@@ -242,9 +242,10 @@ def spawn_detached():
     """Fire and forget: a prompt must never wait on a repair."""
     save_state(spawned=B.now())
     try:
-        subprocess.Popen([sys.executable or "/usr/bin/python3", os.path.abspath(__file__),
-                          "--hook"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+        import osproc
+        osproc.spawn_detached([sys.executable or "/usr/bin/python3", os.path.abspath(__file__),
+                               "--hook"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, close_fds=True)
     except Exception as e:
         B.log_error("linkfix.spawn", e)
 

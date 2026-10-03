@@ -201,14 +201,20 @@ def test_stale_hooks(D):
 
 def test_localize(D):
     print("\n== localize_hooks and command paths ==")
-    loc = D.localize_hooks(canonical(), vault="/home/x/Vault", home="/home/x")
+    loc = D.localize_hooks(canonical(), vault="/home/x/Vault", home="/home/x", platform="linux")
     cmds = [h["command"] for ev in loc.values() for g in ev for h in g["hooks"]]
     check("the original vault path is rewritten to this machine's vault",
           all("/home/x/Vault/_bin/" in c for c in cmds), cmds)
     check("nothing from the original home survives",
           not any("/home/brain-origin" in c for c in cmds), cmds)
-    same = D.localize_hooks(canonical(), vault="/home/brain-origin/Brain", home="/home/brain-origin")
+    same = D.localize_hooks(canonical(), vault="/home/brain-origin/Brain", home="/home/brain-origin",
+                           platform="linux")
     check("on the original machine localize is the identity", same == canonical())
+    win = D.localize_hooks(canonical(), vault="C:\\Vault", home="C:\\Users\\x", platform="win32",
+                           executable="C:\\Py\\python.exe")
+    wcmds = [h["command"] for ev in win.values() for g in ev for h in g["hooks"]]
+    check("on win32 every hook runs python.exe -X utf8 on the backslash vault path",
+          wcmds and all(c.startswith('"C:\\Py\\python.exe" -X utf8 "C:\\Vault\\_bin\\') for c in wcmds), wcmds)
     paths = D.hook_command_paths(canonical())
     check("command paths lists interpreter and scripts once each, in order",
           paths == [PY, V + "/compass.py", V + "/gate_memory.py", V + "/vault_sync.py"], paths)

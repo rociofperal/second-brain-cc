@@ -108,11 +108,13 @@ def setup(T, agent_exit=0, agent_body="echo agent-said-hello", token_value=FAKE_
     write(os.path.join(vault, "90-Meta", "routines", "routine-a.md"), ROUTINE)
     write(os.path.join(vault, "90-Meta", "routine-tokens.json"), json.dumps(POOL))
     args_file = os.path.join(root, "agent-args.txt")
-    agent = write(os.path.join(root, "agent"),
+    from testbin import fake_exe
+    script = os.path.join(root, "agent")
+    agent = fake_exe(script,
                   '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "$1" >> "%s"; echo "1.0 (fake)"; exit 0; fi\n'
                   'printf "%%s\\n" "$@" > "%s"\nenv > "%s"\n%s\nexit %d\n'
                   % (os.path.join(root, "versions.txt"), args_file, os.path.join(root, "agent-env.txt"),
-                     agent_body, agent_exit), mode=0o755)
+                     agent_body, agent_exit))
     T.VAULT = vault
     T.REGISTRY = os.path.join(vault, "90-Meta", "scheduled-tasks.md")
     T.STATE_DIR = state
@@ -129,6 +131,14 @@ def setup(T, agent_exit=0, agent_body="echo agent-said-hello", token_value=FAKE_
     T.host = lambda: "box"
     T.now = lambda: dt.datetime(2026, 9, 14, 7, 0)       # a Monday, after 06:00
     T.raise_alert, T.clear_alert = Recorder(), Recorder()
+    if sys.platform == "win32":
+        # The prompt is several lines, which no .cmd launcher can carry: sh.exe runs the script itself,
+        # as claude.exe would be run.
+        from testbin import find_sh, sh_tool_dirs
+        sh = find_sh()
+        agent = '"%s" "%s"' % (sh, script)
+        # sh.exe started directly finds env, cat and sleep only with Git's tool folders on PATH.
+        os.environ["PATH"] = os.pathsep.join(sh_tool_dirs(sh) + [os.environ.get("PATH", "")])
     os.environ["BRAIN_AGENT_CMD"] = "%s --prompt {prompt} --file {prompt_file}" % agent
     return root, args_file
 
@@ -142,8 +152,11 @@ def quiet(fn, *a):
 
 # ---------------------------------------------------------------- the state file under concurrent runs
 
-WAIT_FOR_GO = ('touch "loaded-$W" && i=0 && while [ ! -e "go-$W" ] && [ $i -lt 600 ]; '
-               'do sleep 0.05; i=$((i+1)); done; exit $RC')
+# Shell rows run through the platform's shell (sh, or cmd.exe on Windows): the waiting row is a
+# Python one-liner so it reads the same to both.
+WAIT_FOR_GO = ('"%s" -c "import os,sys,time; w=os.environ[\'W\']; open(\'loaded-\'+w,\'w\').close(); '
+               'any(os.path.exists(\'go-\'+w) or time.sleep(0.05) for _ in range(600)); '
+               'sys.exit(int(os.environ[\'RC\']))"' % sys.executable.replace("\\", "/"))
 
 STATE_REGISTRY = """---
 id: scheduled-tasks
@@ -154,7 +167,7 @@ id: scheduled-tasks
 | task-a | box | -- | -- | shell | %(wait)s | yes | forced by one run |
 | task-b | box | -- | -- | shell | %(wait)s | yes | forced by another run |
 | task-s | box | -- | -- | shell | %(wait)s | yes | forced by both runs |
-| tick-a | box | 05:00 | * | shell | true | yes | due on the tick |
+| tick-a | box | 05:00 | * | shell | exit 0 | yes | due on the tick |
 """ % {"wait": WAIT_FOR_GO}
 
 # A separate runner process: its own module, the temporary world, `tasks.py --force <task>`.
@@ -176,12 +189,14 @@ sys.exit(T.main(["--force", cfg["task"]]))
 '''
 
 HOLD_LOCK = r'''
-import fcntl, sys, time
+import sys, time
+sys.path.insert(0, @HERE@)
+import oslock
 fh = open(sys.argv[1], "a")
-fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+oslock.lock(fh.fileno())
 print("held", flush=True)
 time.sleep(60)
-'''
+'''.replace("@HERE@", repr(HERE))
 
 # A writer killed between writing its temp file and replacing the state file.
 CHILD_CRASH = r'''
@@ -697,8 +712,14 @@ def main():
               rc == 127 and "agent command" in alerts.get("routine:routine-a", ""), (rc, alerts))
 
         root, _ = setup(T)
+        agent_cmd = os.path.join(root, "agent")
+        if sys.platform == "win32":
+            # As in setup(): the multi-line prompt cannot go through a .cmd launcher (cmd.exe would act on
+            # its line breaks and quotes, so the runner refuses it); sh.exe runs the script itself.
+            from testbin import find_sh
+            agent_cmd = '"%s" "%s"' % (find_sh(), agent_cmd)
         write(os.path.join(T.VAULT, "90-Meta", "agent-command.txt"),
-              "# the agent adapter\n%s --prompt {prompt}\n" % os.path.join(root, "agent"))
+              "# the agent adapter\n%s --prompt {prompt}\n" % agent_cmd)
         os.environ.pop("BRAIN_AGENT_CMD", None)
         rc, _ = quiet(T.main, ["--force", "routine-a"])
         check("the agent command comes from the vault's agent-command.txt when no variable is set",
@@ -775,8 +796,12 @@ def main():
         check("the pool state records the token as healthy",
               pool_state.get("routines-1", {}).get("status") == "healthy", pool_state)
         versions = os.path.join(root, "versions.txt")
-        check("the CLI health check ran once for two runs in one process",
-              os.path.exists(versions) and open(versions).read().count("--version") == 1)
+        if sys.platform == "win32":
+            print("  - the CLI health check ran once for two runs (skipped on Windows: the template's first word is "
+                  "sh.exe there, which answers --version itself)")
+        else:
+            check("the CLI health check ran once for two runs in one process",
+                  os.path.exists(versions) and open(versions).read().count("--version") == 1)
 
         root, args_file = setup(T, agent_exit=1,
                                 agent_body='echo "Failed to authenticate. API Error: 401 OAuth access token is invalid."')

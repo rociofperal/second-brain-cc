@@ -53,6 +53,9 @@ def fixture():
     gcfg = write(os.path.join(root, "gitconfig"), "[user]\n\tname = t\n\temail = t@example.com\n")
     env = dict(os.environ, HOME=home, BRAIN_VAULT=repo, GIT_CONFIG_GLOBAL=gcfg, GIT_CONFIG_NOSYSTEM="1")
     env.pop("BRAIN_STATE", None)
+    if sys.platform == "win32":          # "~" and the app-data dirs come from these, not HOME
+        env.update(USERPROFILE=home, LOCALAPPDATA=os.path.join(home, "AppData", "Local"),
+                   APPDATA=os.path.join(home, "AppData", "Roaming"))
     run(["git", "init", "-q", "-b", "main"], repo, env)
     write(os.path.join(repo, "README.md"), "fixture\n")
     run(["git", "add", "README.md"], repo, env)
@@ -157,7 +160,10 @@ def test_end_to_end():
     for name, text in (("pre-commit", D.render_git_pre_commit(reg)), ("post-commit", D.render_git_post_commit(reg))):
         path = write(os.path.join(repo, "githooks", name), text)
         os.chmod(path, 0o755)
-    os.symlink(BIN, os.path.join(repo, "_bin"))
+    try:
+        os.symlink(BIN, os.path.join(repo, "_bin"))
+    except OSError:                      # Windows without the symlink privilege: a copy does the same job
+        shutil.copytree(BIN, os.path.join(repo, "_bin"), ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     run(["git", "config", "core.hooksPath", "githooks"], repo, env)
 
     before = head(repo, env)

@@ -25,8 +25,9 @@ def main():
                       "confidence: high\nsource: agent\nprovenance: hook\n"
                       "updated: %s\nsupersedes: []\n---\n\n## Trace\n"
                       % (day, sid, sid, B.project_name(data.get("cwd") or ""), day))
-            open(path, "w").write(header)
-        with open(path, "a") as fh:
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(header)
+        with open(path, "a", encoding="utf-8", newline="\n") as fh:
             fh.write("- %s · subagent `%s` finished\n" % (time.strftime("%H:%M"), agent))
 
     # The librarian writes to the vault through vw.py, and vw.py resolves the sid

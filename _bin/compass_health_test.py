@@ -24,6 +24,11 @@ for _p in PATHS.values():
 ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": PATHS["home"], "TMPDIR": ROOT,
        "BRAIN_STATE": PATHS["state"], "BRAIN_VAULT": PATHS["vault"], "BRAIN_OFFLINE": "1",
        "PYTHONDONTWRITEBYTECODE": "1", "GIT_CEILING_DIRECTORIES": ROOT, "BRAIN_MACHINE_KEY": "test-box-12345678"}
+if sys.platform == "win32":
+    # Python will not even start without SYSTEMROOT; "~" and the app-data dirs come from these, not HOME
+    ENV.update({k: os.environ[k] for k in ("SYSTEMROOT", "COMSPEC", "PATHEXT", "PYTHONUTF8") if k in os.environ})
+    ENV.update(USERPROFILE=PATHS["home"], TEMP=ROOT, TMP=ROOT, LOCALAPPDATA=os.path.join(PATHS["home"], "AppData", "Local"),
+               APPDATA=os.path.join(PATHS["home"], "AppData", "Roaming"))
 os.environ.update({k: ENV[k] for k in ("HOME", "BRAIN_STATE", "BRAIN_VAULT", "BRAIN_OFFLINE", "BRAIN_MACHINE_KEY")})
 sys.path.insert(0, HERE)
 

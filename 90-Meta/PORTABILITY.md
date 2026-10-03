@@ -62,7 +62,7 @@ echo "body" | python3 _bin/vw.py new 30-Knowledge/<file>.md --title "T" --type d
 
 Notes **never** carry secrets: they carry `kp://<group>/<entry>` references to a local KeePass
 database, resolved by `_bin/kp.py` over `keepassxc-cli`. That is a text convention plus a small
-wrapper: it works with any agent that can run a shell, on macOS and Linux.
+wrapper: it works with any agent that can run a shell, on macOS, Linux and Windows (Git for Windows, Python with `-X utf8`).
 
 ### 5. The files (configured on first run, mandatory)
 
@@ -146,10 +146,11 @@ Before ending a session that decided anything, write it down in 30-Knowledge/.
 
 ---
 
-## Across macOS and Linux
+## Across macOS, Linux and Windows
 
-The vault runs on macOS and Linux, and a machine added later should be cheaper than the first one.
-These are the assumptions that broke when a setup that had only ever run on one Mac got a Linux peer.
+The vault runs on macOS, Linux and Windows, and a machine added later should be cheaper than the first one.
+These are the assumptions that broke when a setup that had only ever run on one Mac got a Linux peer,
+and then a Windows one (scheduled jobs there are Task Scheduler tasks; Python runs with `-X utf8`).
 Keep them in mind when writing any script, skill or scheduled task.
 
 - **Find programs, never hardcode their path.** A literal `/opt/homebrew/bin/<tool>` dies on Linux

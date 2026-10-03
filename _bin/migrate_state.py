@@ -32,6 +32,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
+import oslink  # noqa: E402
 
 
 class MigrationError(Exception):
@@ -39,7 +40,7 @@ class MigrationError(Exception):
 
 
 def plan(legacy, new):
-    if os.path.islink(legacy):
+    if oslink.is_link(legacy):
         return "done" if os.path.realpath(legacy) == os.path.realpath(new) else "foreign-symlink"
     if not os.path.lexists(legacy):
         return "fresh"
@@ -57,7 +58,8 @@ def _merge(src_dir, dst_dir, rel, stamp, moved, kept):
     for name in sorted(os.listdir(src_dir)):
         src, dst = os.path.join(src_dir, name), os.path.join(dst_dir, name)
         path = os.path.join(rel, name) if rel else name
-        if os.path.isdir(src) and not os.path.islink(src) and os.path.isdir(dst) and not os.path.islink(dst):
+        if (os.path.isdir(src) and not oslink.is_link(src) and os.path.isdir(dst)
+                and not oslink.is_link(dst)):
             _merge(src, dst, path, stamp, moved, kept)
             os.rmdir(src)
         elif not os.path.lexists(dst):
@@ -93,7 +95,7 @@ def migrate(legacy, new, backup_dir, dry_run=False, clock=time.time):
         else:
             os.makedirs(new, exist_ok=True)
             os.makedirs(os.path.dirname(legacy), exist_ok=True)
-        os.symlink(new, legacy)
+        oslink.make_dir_link(new, legacy)
         if os.path.realpath(legacy) != os.path.realpath(new):
             raise MigrationError("the symlink %s does not resolve to %s" % (legacy, new))
         report["ok"] = True
@@ -103,7 +105,7 @@ def migrate(legacy, new, backup_dir, dry_run=False, clock=time.time):
 
 
 def rollback(legacy, new, backup):
-    if not (os.path.islink(legacy) and os.path.realpath(legacy) == os.path.realpath(new)):
+    if not (oslink.is_link(legacy) and os.path.realpath(legacy) == os.path.realpath(new)):
         raise MigrationError("%s is not the migration's symlink to %s: nothing to roll back" % (legacy, new))
     if not os.path.isfile(backup):
         raise MigrationError("backup not found: %s" % backup)
@@ -121,7 +123,7 @@ def rollback(legacy, new, backup):
         restored = os.path.join(staging, "brain")
         if not os.path.isdir(restored):
             raise MigrationError("backup does not hold a brain/ directory: %s" % backup)
-        os.remove(legacy)
+        oslink.remove_link(legacy)
         os.rename(restored, legacy)
     finally:
         shutil.rmtree(staging, ignore_errors=True)

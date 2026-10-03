@@ -28,6 +28,14 @@ def check(name, cond, detail=""):
 
 
 def main():
+    if sys.platform == "win32":
+        script = open(INSTALL, encoding="utf-8").read()
+        schedulers = [w for w in ("launchctl", "systemctl", "crontab") if w in script]
+        check("install.sh never talks to a scheduler (the first run owns scheduled jobs)", schedulers == [], schedulers)
+        print("  skipped on Windows: running install.sh needs bash (on a plain Windows runner `bash` is the WSL "
+              "launcher, which has no distribution); install.py and install.ps1 are covered by _bin/windows_install_test.py")
+        print("\nRESULT: %d passed, %d failed" % (len(ok), len(fail)))
+        return 1 if fail else 0
     root = tempfile.mkdtemp(prefix="claude-install-")
     try:
         home, state = os.path.join(root, "home"), os.path.join(root, "state")

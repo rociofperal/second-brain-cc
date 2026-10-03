@@ -84,7 +84,8 @@ def cli(argv):
     args = ap.parse_args(argv)
     if not B.enabled():
         return 0
-    notes = [os.path.join(B.VAULT, p) for p in args.paths if os.path.isfile(os.path.join(B.VAULT, p))]
+    notes = [os.path.normpath(os.path.join(B.VAULT, p)) for p in args.paths
+             if os.path.isfile(os.path.join(B.VAULT, p))]
     if notes:
         con = B.db()
         B.record_vault_writes(con, args.sid, notes, B.now())

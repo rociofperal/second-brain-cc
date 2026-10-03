@@ -47,10 +47,20 @@ def run_one(root, rel, python=sys.executable):
     env = {k: v for k, v in os.environ.items() if not k.startswith("BRAIN_")}
     # SECOND_BRAIN_TEST_RUN tells scripts a test started them (doctor.py then never runs the suite).
     env.update(HOME=home, BRAIN_STATE=state, BRAIN_VAULT=root, PYTHONDONTWRITEBYTECODE="1", SECOND_BRAIN_TEST_RUN="1")
+    if sys.platform == "win32":
+        # UTF-8 mode: the notes, and the ✓/✗ the tests print, are UTF-8. Windows would otherwise use the
+        # console/ANSI code page (cp1252) for stdout and for open() without an explicit encoding.
+        env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+        # Windows has no $HOME: point the profile folders at the scratch directory too, so a test
+        # can never touch the real one.
+        env.update(USERPROFILE=home, APPDATA=os.path.join(home, "AppData", "Roaming"),
+                   LOCALAPPDATA=os.path.join(home, "AppData", "Local"))
+        os.makedirs(env["APPDATA"]); os.makedirs(env["LOCALAPPDATA"])
     start = time.time()
     try:
         p = subprocess.run([python, os.path.join(root, rel)], cwd=root, env=env, stdin=subprocess.DEVNULL,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=TIMEOUT)
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                           encoding="utf-8", errors="replace", timeout=TIMEOUT)
         out, rc = p.stdout, p.returncode
     except subprocess.TimeoutExpired as exc:
         out, rc = (exc.stdout or "") if isinstance(exc.stdout, str) else "", "timeout"
@@ -93,7 +103,12 @@ def main(argv=None):
         print("%s %-60s %-24s rc=%s %.1fs" % (status, r["file"], detail, r["rc"], r["seconds"]))
     if args.verbose:
         for r in broken:
-            print("\n---- %s ----\n%s" % (r["file"], r["output"][-4000:]))
+            # The tail alone can cut the failing check off a long output: always show every failed
+            # check (✗ line plus the detail line under it) before the tail.
+            lines = r["output"].splitlines()
+            failed_checks = [ln for i, l in enumerate(lines) if "\u2717" in l for ln in lines[i:i + 2]]
+            head = ("failed checks:\n" + "\n".join(failed_checks)[:6000] + "\n--- tail ---\n") if failed_checks else ""
+            print("\n---- %s ----\n%s%s" % (r["file"], head, r["output"][-4000:]))
     print("RESULT: %d passed, %d failed" % (total_passed, total_failed))
     return 1 if broken else 0
 

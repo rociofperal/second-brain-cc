@@ -276,10 +276,9 @@ def publish_async(sid, popen=None):
         return False
     try:
         import subprocess
-        (popen or subprocess.Popen)(
-            [sys.executable, os.path.abspath(__file__), "publish", "--sid", sid],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True)
+        __import__("osproc").spawn_detached(
+            [sys.executable, os.path.abspath(__file__), "publish", "--sid", sid], popen=popen or subprocess.Popen,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except Exception as e:
         B.log_error("claims_sync.publish_async", e)
