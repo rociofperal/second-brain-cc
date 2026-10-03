@@ -1,5 +1,17 @@
 # Second Brain
 
+> **Windows version · Versión para Windows**
+>
+> This repository is a fork of [second-brain-cc](https://github.com/gotoalberto/second-brain-cc) by
+> Alberto G. Toribio, extended to run natively on **Windows 10/11** as well as macOS and Linux. It is
+> published with the author's permission. The project and its design are his; what this fork adds is
+> Windows support. Installation on Windows: see [Windows](#windows) below.
+>
+> Este repositorio es un fork de [second-brain-cc](https://github.com/gotoalberto/second-brain-cc), de
+> Alberto G. Toribio, ampliado para funcionar de forma nativa en **Windows 10/11** además de macOS y
+> Linux. Se publica con permiso del autor. El proyecto y su diseño son suyos; lo que añade este fork es
+> el soporte para Windows. La instalación en Windows está en la sección [Windows](#windows), más abajo.
+
 Persistent memory and a working protocol for **any AI agent**: an
 [Obsidian](https://obsidian.md)-compatible vault of Markdown notes plus a small,
 standard-library-only Python engine with a SQLite FTS5 search index and a git-synced repo.
@@ -38,7 +50,7 @@ integrations at once. [OpenCode](integrations/opencode/) has a worked example.
 ## Quick start
 
 ```bash
-git clone https://github.com/gotoalberto/second-brain-cc.git ~/Brain
+git clone https://github.com/rociofperal/second-brain-cc.git ~/Brain
 bash ~/Brain/bootstrap.sh
 ```
 
@@ -62,7 +74,7 @@ it. Nothing else is required; `winget install KeePassXCTeam.KeePassXC` and
 `winget install Obsidian.Obsidian` add the optional tools.
 
 ```powershell
-git clone https://github.com/gotoalberto/second-brain-cc.git $HOME\Brain
+git clone https://github.com/rociofperal/second-brain-cc.git $HOME\Brain
 powershell -ExecutionPolicy Bypass -File $HOME\Brain\bootstrap.ps1                       # core: index, health, first run
 powershell -ExecutionPolicy Bypass -File $HOME\Brain\integrations\claude-code\install.ps1   # Claude Code: skills, hooks
 ```
